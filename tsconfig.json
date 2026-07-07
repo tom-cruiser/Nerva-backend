@@ -1,0 +1,15 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/types" },
+    { "path": "packages/config" },
+    { "path": "packages/db" },
+    { "path": "packages/redis" },
+    { "path": "packages/middleware" },
+    { "path": "services/auth-tenant" },
+    { "path": "services/inventory" },
+    { "path": "services/sales-sync" },
+    { "path": "services/ledger-payments" },
+    { "path": "services/whatsapp-engine" }
+  ]
+}

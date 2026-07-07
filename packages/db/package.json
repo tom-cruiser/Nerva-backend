@@ -1,0 +1,23 @@
+{
+  "name": "@retail/db",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build":            "tsc --build && npm run copy:migrations",
+    "copy:migrations":  "cp -r src/migrations dist/migrations",
+    "migrate":          "ts-node -r dotenv/config src/migrate.ts",
+    "migrate:dry":      "ts-node -r dotenv/config src/migrate.ts -- --dry-run",
+    "migrate:rollback": "ts-node -r dotenv/config src/migrate.ts -- --rollback"
+  },
+  "dependencies": {
+    "@retail/config": "*",
+    "pg":             "^8.11.5",
+    "dotenv":         "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/pg":   "^8.11.5",
+    "@types/node": "^20.0.0",
+    "ts-node":     "^10.9.2"
+  }
+}

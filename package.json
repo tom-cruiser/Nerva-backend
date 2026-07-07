@@ -1,0 +1,23 @@
+{
+  "name": "whatsapp-retailers-backend",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "lint": "eslint 'services/**/*.ts' 'packages/**/*.ts'",
+    "migrate":          "npm run migrate --workspace=packages/db",
+    "migrate:dry":      "npm run migrate:dry --workspace=packages/db",
+    "migrate:rollback": "npm run migrate:rollback --workspace=packages/db"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "eslint": "^8.57.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0"
+  }
+}

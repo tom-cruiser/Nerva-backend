@@ -1,0 +1,97 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB:       retail_saas
+      POSTGRES_USER:     retail_app
+      POSTGRES_PASSWORD: change_me_in_production
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U retail_app -d retail_saas"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  auth-tenant:
+    build:
+      context: .
+      dockerfile: services/auth-tenant/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3001
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+  inventory:
+    build:
+      context: .
+      dockerfile: services/inventory/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3002
+    ports:
+      - "3002:3002"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  sales-sync:
+    build:
+      context: .
+      dockerfile: services/sales-sync/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3003
+    ports:
+      - "3003:3003"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+  ledger-payments:
+    build:
+      context: .
+      dockerfile: services/ledger-payments/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3004
+    ports:
+      - "3004:3004"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  whatsapp-engine:
+    build:
+      context: .
+      dockerfile: services/whatsapp-engine/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3005
+    ports:
+      - "3005:3005"
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  postgres_data:
+  redis_data:
