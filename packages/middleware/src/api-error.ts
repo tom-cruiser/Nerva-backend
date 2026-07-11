@@ -28,8 +28,8 @@ export class ApiError extends Error {
 // ─── Convenience factories ────────────────────────────────────────────────────
 
 export const Errors = {
-  unauthorized:   (msg = 'Authentication required')  => new ApiError(msg, 'UNAUTHORIZED',   401),
-  forbidden:      (msg = 'Access denied')            => new ApiError(msg, 'FORBIDDEN',      403),
+  unauthorized:   (msg = 'Authentication required', d: Record<string, unknown> = {})  => new ApiError(msg, 'UNAUTHORIZED',   401, d),
+  forbidden:      (msg = 'Access denied', d: Record<string, unknown> = {})            => new ApiError(msg, 'FORBIDDEN',      403, d),
   notFound:       (msg = 'Resource not found')       => new ApiError(msg, 'NOT_FOUND',      404),
   conflict:       (msg = 'Duplicate request',
                    d: Record<string, unknown> = {})  => new ApiError(msg, 'CONFLICT',       409, d),

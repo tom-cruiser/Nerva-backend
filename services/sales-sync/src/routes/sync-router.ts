@@ -10,7 +10,8 @@ const syncRouter = Router();
 // How long to wait inline for the worker to finish before returning 202
 const INLINE_TIMEOUT_MS = 8_000;
 // Idempotency TTL for sync results: 24 hours (skill-2 spec)
-const SYNC_IDEMPOTENCY_TTL = 24 * 60 * 60;
+const SYNC_IDEMPOTENCY_TTL = 24 * 60 * 60; // kept for reference
+void SYNC_IDEMPOTENCY_TTL;
 
 // ─── POST /api/v1/sync/batch ──────────────────────────────────────────────────
 

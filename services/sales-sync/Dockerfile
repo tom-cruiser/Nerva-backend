@@ -1,28 +1,46 @@
-FROM node:18-alpine AS builder
+# ── Stage 1: Build ────────────────────────────────────────────────────────────
+FROM node:20-alpine AS builder
 WORKDIR /app
+
+# Copy root configs and package manifests
 COPY package.json tsconfig.base.json tsconfig.json ./
 COPY packages/types/package.json       packages/types/
 COPY packages/db/package.json          packages/db/
 COPY packages/redis/package.json       packages/redis/
 COPY packages/middleware/package.json  packages/middleware/
+COPY packages/config/package.json      packages/config/
 COPY services/sales-sync/package.json  services/sales-sync/
-RUN npm install --workspaces --include-workspace-root
-COPY packages/ packages/
-COPY services/sales-sync/ services/sales-sync/
-RUN npm run build --workspace=packages/types \
- && npm run build --workspace=packages/db \
- && npm run build --workspace=packages/redis \
- && npm run build --workspace=packages/middleware \
- && npm run build --workspace=services/sales-sync
 
-FROM node:18-alpine AS runtime
+# Install dependencies across all workspaces
+RUN npm install --workspaces --include-workspace-root
+
+# Copy source code files
+COPY packages/ packages/
+COPY services/ services/
+
+# Pre-create internal package dist directories and compile the whole monorepo
+RUN mkdir -p packages/db/dist packages/types/dist packages/redis/dist packages/middleware/dist \
+ && npm run build
+
+# Remove development dependencies to keep the final production image small
+RUN npm prune --production --workspaces --include-workspace-root
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+
+# Copy optimized production dependencies only
 COPY --from=builder /app/node_modules              ./node_modules
+
+# Copy internal shared packages from the builder stage
 COPY --from=builder /app/packages/types/dist       packages/types/dist
 COPY --from=builder /app/packages/db/dist          packages/db/dist
 COPY --from=builder /app/packages/redis/dist       packages/redis/dist
 COPY --from=builder /app/packages/middleware/dist   packages/middleware/dist
+
+# Pull the compiled sales-sync build out of the builder stage
 COPY --from=builder /app/services/sales-sync/dist  services/sales-sync/dist
+
 EXPOSE 3003
 CMD ["node", "services/sales-sync/dist/server.js"]

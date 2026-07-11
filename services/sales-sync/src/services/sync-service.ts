@@ -99,7 +99,7 @@ async function processSale(
         JSON.stringify(d.items_sold),
         d.total_amount, d.discount_amount, d.tax_amount,
         d.payment_method, d.payment_status,
-        workerTag, d.sale_timestamp,
+            workerTag, d.sale_timestamp,
       ],
     );
     await writeAuditLog(client, tenantId, 'sale', serverId, 'CREATE', workerTag, null, d);
@@ -291,7 +291,7 @@ async function processCustomer(
   client:    PoolClient,
   change:    SyncChangeInput,
   tenantId:  string,
-  workerTag: string,
+  _workerTag: string,
   accepted:  AcceptedChange[],
   rejected:  RejectedChange[],
   conflicts: ConflictRecord[],

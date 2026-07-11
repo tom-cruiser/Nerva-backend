@@ -4,3 +4,12 @@ dist/
 *.local
 *.log
 coverage/
+
+# build artifacts
+*.tsbuildinfo
+
+# editor
+.vscode/
+
+# nested frontend (separate repo: Nerva-frontend-)
+Nerva-frontend/

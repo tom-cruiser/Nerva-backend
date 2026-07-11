@@ -8,7 +8,7 @@ import { getTenantContext } from '@retail/middleware';
 const inventoryRouter = Router();
 
 // GET /api/v1/inventory/products
-inventoryRouter.get('/products', (req, res) => {
+inventoryRouter.get('/products', (_req, res) => {
   const ctx = getTenantContext(res); // tenant boundary enforced here
   // TODO: query WHERE tenant_id = ctx.tenantId
   res.status(501).json({ tenantId: ctx.tenantId, error: 'Not yet implemented' });

@@ -24,7 +24,7 @@ export function requireSuperadmin() {
     }
 
     // Expect a dedicated permission 'superadmin:access' to be present
-    if (!Array.isArray(ctx.permissions) || !ctx.permissions.includes('superadmin:access')) {
+    if (!Array.isArray(ctx.permissions) || !(ctx.permissions as string[]).includes('superadmin:access')) {
       sendError(res, Errors.forbidden('Superadmin access required'));
       return;
     }
