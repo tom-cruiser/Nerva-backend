@@ -43,10 +43,19 @@ export function rateLimit(redisClient: Redis, options: RateLimitOptions = {}) {
     const windowKey     = Math.floor(Date.now() / (windowSeconds * 1000));
     const redisKey      = `ratelimit:${discriminator}:${windowKey}`;
 
-    const count = await redisClient.incr(redisKey);
-    if (count === 1) {
-      // Set TTL on first increment — key expires naturally after the window
-      await redisClient.expire(redisKey, windowSeconds + 1);
+    let count: number;
+    try {
+      count = await redisClient.incr(redisKey);
+      if (count === 1) {
+        // Set TTL on first increment — key expires naturally after the window
+        await redisClient.expire(redisKey, windowSeconds + 1);
+      }
+    } catch (err) {
+      // Fail OPEN: a rate limiter must never take down the endpoint it guards.
+      // If Redis is unreachable, allow the request rather than hanging/erroring.
+      console.error('[rate-limit] Redis unavailable — allowing request', (err as Error).message);
+      next();
+      return;
     }
 
     res.setHeader('X-RateLimit-Limit',     max);

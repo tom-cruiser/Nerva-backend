@@ -5,7 +5,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build":            "tsc --build && npm run copy:migrations",
-    "copy:migrations":  "cp -r src/migrations dist/migrations",
+    "copy:migrations":  "mkdir -p dist/migrations && cp -r src/migrations/. dist/migrations/",
     "migrate":          "ts-node -r dotenv/config src/migrate.ts",
     "migrate:dry":      "ts-node -r dotenv/config src/migrate.ts -- --dry-run",
     "migrate:rollback": "ts-node -r dotenv/config src/migrate.ts -- --rollback"

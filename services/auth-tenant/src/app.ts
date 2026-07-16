@@ -2,10 +2,13 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import { requestId, globalErrorHandler } from '@retail/middleware';
+import { requestId, globalErrorHandler, corsMiddleware } from '@retail/middleware';
 import { authRouter } from './routes/auth-router';
 
 const app = express();
+
+// ─── CORS (preflight + origin headers before anything else) ──────────────────
+app.use(corsMiddleware);
 
 // ─── Security headers ─────────────────────────────────────────────────────────
 app.use(helmet());

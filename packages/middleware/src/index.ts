@@ -15,3 +15,4 @@ export {
   requireOwnerOrPermission,
 }                                                                  from './require-permission';
 export { requireSuperadmin }                                       from './superadmin';
+export { corsMiddleware }                                          from './cors';

@@ -2,28 +2,30 @@
   "name": "@retail/auth-tenant",
   "version": "1.0.0",
   "scripts": {
-    "dev":   "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "ts-node-dev -r dotenv/config --respawn --transpile-only src/server.ts",
     "build": "tsc --build",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "provision-user": "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config scripts/provision-user.ts"
   },
   "dependencies": {
-    "@retail/config":     "*",
-    "@retail/db":         "*",
+    "@retail/config": "*",
+    "@retail/db": "*",
     "@retail/middleware": "*",
-    "@retail/redis":      "*",
-    "@retail/types":      "*",
-    "express":            "^4.19.2",
-    "helmet":             "^7.1.0",
-    "cookie-parser":      "^1.4.6",
-    "jsonwebtoken":       "^9.0.2",
-    "bcrypt":             "^5.1.1",
-    "dotenv":             "^16.4.5"
+    "@retail/redis": "*",
+    "@retail/types": "*",
+    "@supabase/supabase-js": "^2.110.3",
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
-    "@types/express":      "^4.17.21",
+    "@types/bcrypt": "^5.0.2",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.6",
-    "@types/bcrypt":       "^5.0.2",
-    "@types/cookie-parser":"^1.4.7",
-    "ts-node-dev":         "^2.0.0"
+    "ts-node-dev": "^2.0.0"
   }
 }

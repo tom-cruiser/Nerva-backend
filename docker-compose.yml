@@ -16,6 +16,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    networks:
+      - nerva-network
 
   redis:
     image: redis:7-alpine
@@ -29,6 +31,8 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    networks:
+      - nerva-network
 
   auth-tenant:
     build:
@@ -37,11 +41,15 @@ services:
     env_file: .env
     environment:
       PORT: 3001
+      NODE_ENV: development
     ports:
       - "3001:3001"
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
 
   inventory:
     build:
@@ -50,10 +58,15 @@ services:
     env_file: .env
     environment:
       PORT: 3002
+      NODE_ENV: development
     ports:
       - "3002:3002"
     depends_on:
       postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
 
   sales-sync:
     build:
@@ -62,11 +75,17 @@ services:
     env_file: .env
     environment:
       PORT: 3003
+      NODE_ENV: development
+      # Queue name for BullMQ - must not contain colons
+      SYNC_QUEUE_NAME: sales-sync-batch
     ports:
       - "3003:3003"
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
 
   ledger-payments:
     build:
@@ -75,10 +94,15 @@ services:
     env_file: .env
     environment:
       PORT: 3004
+      NODE_ENV: development
     ports:
       - "3004:3004"
     depends_on:
       postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
 
   whatsapp-engine:
     build:
@@ -87,10 +111,15 @@ services:
     env_file: .env
     environment:
       PORT: 3005
+      NODE_ENV: development
     ports:
       - "3005:3005"
     depends_on:
       postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
 
   # ── API Gateway (nginx) — single entry point for all backend services ────────
   gateway:
@@ -105,18 +134,32 @@ services:
       - sales-sync
       - ledger-payments
       - whatsapp-engine
+    networks:
+      - nerva-network
+    restart: unless-stopped
 
   # ── Frontend (Next.js) ───────────────────────────────────────────────────────
   frontend:
     build:
-      context: ./Nerva-frontend
+      context: ../Nerva-frontend
       dockerfile: Dockerfile
     ports:
       - "3000:3000"
     environment:
       NODE_ENV: production
       NEXT_PUBLIC_API_URL: http://localhost:8080
+    depends_on:
+      - gateway
+    networks:
+      - nerva-network
+    restart: unless-stopped
+
+networks:
+  nerva-network:
+    driver: bridge
 
 volumes:
   postgres_data:
+    driver: local
   redis_data:
+    driver: local

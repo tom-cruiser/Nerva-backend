@@ -9,15 +9,25 @@
   "scripts": {
     "build": "tsc --build",
     "lint": "eslint 'services/**/*.ts' 'packages/**/*.ts'",
-    "migrate":          "npm run migrate --workspace=packages/db",
-    "migrate:dry":      "npm run migrate:dry --workspace=packages/db",
-    "migrate:rollback": "npm run migrate:rollback --workspace=packages/db"
+    "migrate": "npm run migrate --workspace=packages/db",
+    "migrate:dry": "npm run migrate:dry --workspace=packages/db",
+    "migrate:rollback": "npm run migrate:rollback --workspace=packages/db",
+    "dev": "concurrently --kill-others-on-fail --prefix-colors \"cyan,green,yellow,magenta,blue,white\" --names \"gateway,auth,inventory,sales,ledger,whatsapp\" \"node dev-gateway.cjs\" \"npm run dev --workspace=services/auth-tenant\" \"npm run dev --workspace=services/inventory\" \"npm run dev --workspace=services/sales-sync\" \"npm run dev --workspace=services/ledger-payments\" \"npm run dev --workspace=services/whatsapp-engine\"",
+    "dev:gateway": "node dev-gateway.cjs",
+    "dev:auth": "npm run dev --workspace=services/auth-tenant",
+    "dev:inventory": "npm run dev --workspace=services/inventory",
+    "dev:sales": "npm run dev --workspace=services/sales-sync",
+    "dev:ledger": "npm run dev --workspace=services/ledger-payments",
+    "dev:whatsapp": "npm run dev --workspace=services/whatsapp-engine",
+    "dev:no-sync": "concurrently --kill-others-on-fail --prefix-colors \"cyan,green,yellow,magenta\" --names \"gateway,auth,inventory,ledger\" \"node dev-gateway.cjs\" \"npm run dev --workspace=services/auth-tenant\" \"npm run dev --workspace=services/inventory\" \"npm run dev --workspace=services/ledger-payments\""
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "typescript": "^5.4.0",
-    "eslint": "^8.57.0",
+    "@types/qrcode": "^1.5.6",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
     "@typescript-eslint/parser": "^7.0.0",
-    "@typescript-eslint/eslint-plugin": "^7.0.0"
+    "concurrently": "^9.1.2",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
   }
 }

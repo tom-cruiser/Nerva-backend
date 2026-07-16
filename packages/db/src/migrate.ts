@@ -53,8 +53,9 @@ function getMigrationFiles(rollback: boolean): string[] {
   const files = fs
     .readdirSync(MIGRATIONS_DIR)
     .filter((f) => {
-      if (rollback) return f.endsWith('_rollback.sql');
-      return f.match(/^\d+_/u) && f.endsWith('.sql') && !f.endsWith('_rollback.sql');
+      if (rollback) return f.endsWith('_rollback.sql') || f.endsWith('_down.sql');
+      return Boolean(f.match(/^\d+_/u)) && f.endsWith('.sql')
+        && !f.endsWith('_rollback.sql') && !f.endsWith('_down.sql');
     })
     .sort();
   return files;

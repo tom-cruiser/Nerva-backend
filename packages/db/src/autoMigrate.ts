@@ -23,9 +23,12 @@ export async function runPendingMigrations(): Promise<void> {
       )
     `);
 
-    // Read migration files
+    // Read migration files — forward migrations only. Explicitly exclude
+    // reversal scripts (*_rollback.sql / *_down.sql); otherwise a service boot
+    // would apply the schema and then immediately tear it down.
     const files = fs.readdirSync(MIGRATIONS_DIR)
-      .filter((f) => f.match(/^\d+_.*\.sql$/u))
+      .filter((f) => /^\d+_.*\.sql$/u.test(f))
+      .filter((f) => !f.endsWith('_rollback.sql') && !f.endsWith('_down.sql'))
       .sort();
 
     const res = await client.query<{ filename: string }>('SELECT filename FROM migration_meta');

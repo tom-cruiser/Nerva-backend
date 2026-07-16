@@ -15,13 +15,27 @@ import runPendingMigrations from './autoMigrate';
  */
 const databaseUrl = process.env['DATABASE_URL'];
 
+/**
+ * Resolve the pg `ssl` option from DB_SSL:
+ *   'true'      → TLS with certificate verification (production default)
+ *   'no-verify' → TLS without verification (Supabase pooler w/o supplied CA)
+ *   'false'/unset → no TLS
+ */
+function resolveSsl(): false | { rejectUnauthorized: boolean } {
+  switch (process.env['DB_SSL']) {
+    case 'true':      return { rejectUnauthorized: true };
+    case 'no-verify': return { rejectUnauthorized: false };
+    default:          return false;
+  }
+}
+
 const pool = databaseUrl
   ? new Pool({
       connectionString:        databaseUrl,
       max:                     20,
       idleTimeoutMillis:       30_000,
       connectionTimeoutMillis: 5_000,
-      ssl: process.env['DB_SSL'] === 'true' ? { rejectUnauthorized: true } : false,
+      ssl: resolveSsl(),
     })
   : new Pool({
       host:                    process.env['DB_HOST']     ?? 'localhost',
@@ -32,7 +46,7 @@ const pool = databaseUrl
       max:                     20,
       idleTimeoutMillis:       30_000,
       connectionTimeoutMillis: 5_000,
-      ssl: process.env['DB_SSL'] === 'true' ? { rejectUnauthorized: true } : false,
+      ssl: resolveSsl(),
     });
 
 pool.on('error', (err: Error) => {
@@ -74,8 +88,14 @@ export async function closePool(): Promise<void> {
   await pool.end();
 }
 
-// Run migrations eagerly on first import in non-test environments
-if (process.env['NODE_ENV'] !== 'test') {
+// Eager auto-migration on first pool import.
+//
+// OFF by default: with a shared database, every booting service would otherwise
+// race the same DDL (and the `npm run migrate` CLI), causing errors like
+// "duplicate key ... pg_extension_name_index". Apply migrations once out-of-band
+// via `npm run migrate`. Opt in per-process with DB_AUTO_MIGRATE=true (e.g. a
+// single designated migrator, or local dev convenience). Never in tests.
+if (process.env['DB_AUTO_MIGRATE'] === 'true' && process.env['NODE_ENV'] !== 'test') {
   (async () => {
     try {
       await runPendingMigrations();

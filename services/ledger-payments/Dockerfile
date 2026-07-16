@@ -1,46 +1,64 @@
-# ── Stage 1: Build ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+# ====================================================================
+# STAGE 1: Base image for caching dependencies
+# ====================================================================
+FROM node:20-alpine AS base
 WORKDIR /app
 
-# Copy root configs and package manifests
-COPY package.json tsconfig.base.json tsconfig.json ./
-COPY packages/types/package.json            packages/types/
-COPY packages/db/package.json               packages/db/
-COPY packages/redis/package.json            packages/redis/
-COPY packages/middleware/package.json       packages/middleware/
-COPY packages/config/package.json           packages/config/
-COPY services/ledger-payments/package.json  services/ledger-payments/
+# Copy root configurations
+COPY package.json package-lock.json* tsconfig.base.json tsconfig.json ./
 
-# Install dependencies across all workspaces
-RUN npm install --workspaces --include-workspace-root
+# Copy package.json structures for workspaces
+COPY packages/types/package.json ./packages/types/
+COPY packages/db/package.json ./packages/db/
+COPY packages/redis/package.json ./packages/redis/
+COPY packages/middleware/package.json ./packages/middleware/
+COPY packages/config/package.json ./packages/config/
+COPY services/ledger-payments/package.json ./services/ledger-payments/
 
-# Copy source code files
-COPY packages/ packages/
-COPY services/ services/
+# ====================================================================
+# STAGE 2: Install dependencies and compile TypeScript
+# ====================================================================
+FROM base AS builder
+# Install ALL dependencies
+RUN npm clean-install --workspaces --include-workspace-root
 
-# Pre-create internal package dist directories and compile the whole monorepo
-RUN mkdir -p packages/db/dist packages/types/dist packages/redis/dist packages/middleware/dist \
- && npm run build
+# Copy the rest of the source code
+COPY packages/ ./packages/
+COPY services/ ./services/
 
-# Remove development dependencies to keep the final production image small
-RUN npm prune --production --workspaces --include-workspace-root
+# Build ledger-payments and its dependencies
+RUN npx tsc --build services/ledger-payments --force
 
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+# ====================================================================
+# STAGE 3: Final runtime image with production dependencies
+# ====================================================================
 FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Copy optimized production dependencies only
-COPY --from=builder /app/node_modules                  ./node_modules
+# 1. First, recreate the workspace folder structure in runtime
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/packages/types/package.json ./packages/types/package.json
+COPY --from=builder /app/packages/db/package.json ./packages/db/package.json
+COPY --from=builder /app/packages/redis/package.json ./packages/redis/package.json
+COPY --from=builder /app/packages/middleware/package.json ./packages/middleware/package.json
+COPY --from=builder /app/packages/config/package.json ./packages/config/package.json
+COPY --from=builder /app/services/ledger-payments/package.json ./services/ledger-payments/package.json
 
-# Copy internal shared packages from the builder stage
-COPY --from=builder /app/packages/types/dist           packages/types/dist
-COPY --from=builder /app/packages/db/dist              packages/db/dist
-COPY --from=builder /app/packages/redis/dist           packages/redis/dist
-COPY --from=builder /app/packages/middleware/dist       packages/middleware/dist
+# 2. Copy node_modules from builder and prune dev dependencies
+COPY --from=builder /app/node_modules ./node_modules
+RUN npm prune --omit=dev --workspaces --include-workspace-root
 
-# Pull the compiled ledger-payments build out of the builder stage
-COPY --from=builder /app/services/ledger-payments/dist services/ledger-payments/dist
+# 3. Copy compiled files
+COPY --from=builder /app/packages/types/dist ./packages/types/dist
+COPY --from=builder /app/packages/db/dist ./packages/db/dist
+COPY --from=builder /app/packages/redis/dist ./packages/redis/dist
+COPY --from=builder /app/packages/middleware/dist ./packages/middleware/dist
+COPY --from=builder /app/services/ledger-payments/dist ./services/ledger-payments/dist
+
+# 4. Copy compiled config files
+COPY --from=builder /app/packages/config/dist ./packages/config/dist
 
 EXPOSE 3004
+
 CMD ["node", "services/ledger-payments/dist/server.js"]

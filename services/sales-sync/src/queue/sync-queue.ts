@@ -8,7 +8,7 @@ const connection = {
   password: new URL(env.BULLMQ_REDIS_URL).password || undefined,
 };
 
-export const SYNC_QUEUE_NAME = 'sales-sync:batch';
+export const SYNC_QUEUE_NAME = 'sales-sync-batch';
 
 /**
  * BullMQ Queue instance.

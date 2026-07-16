@@ -74,8 +74,18 @@ function normalisePem(pem: string): string {
   return pem.replace(/\\n/g, '\n');
 }
 
-const PRIVATE_KEY = normalisePem(env.JWT_PRIVATE_KEY);
-const PUBLIC_KEY  = normalisePem(env.JWT_PUBLIC_KEY);
+// These are optional cluster-wide (other services verify via Supabase JWKS),
+// but auth-tenant MUST have them to mint its own tokens — fail fast if absent.
+const rawPrivateKey = env.JWT_PRIVATE_KEY;
+const rawPublicKey  = env.JWT_PUBLIC_KEY;
+if (!rawPrivateKey || !rawPublicKey) {
+  throw new Error(
+    '[crypto-service] JWT_PRIVATE_KEY and JWT_PUBLIC_KEY are required by auth-tenant to sign tokens.',
+  );
+}
+
+const PRIVATE_KEY = normalisePem(rawPrivateKey);
+const PUBLIC_KEY  = normalisePem(rawPublicKey);
 
 // Validate at import time — crashes the process immediately if keys are wrong
 assertPemKey(PRIVATE_KEY, 'JWT_PRIVATE_KEY', 'PRIVATE KEY');

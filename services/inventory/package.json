@@ -2,7 +2,7 @@
   "name": "@retail/inventory",
   "version": "1.0.0",
   "scripts": {
-    "dev":   "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "DOTENV_CONFIG_PATH=../../.env ts-node-dev -r dotenv/config --respawn --transpile-only src/server.ts",
     "build": "tsc --build",
     "start": "node dist/server.js"
   },

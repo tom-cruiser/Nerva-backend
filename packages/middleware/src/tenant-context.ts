@@ -1,10 +1,11 @@
-import { AsyncLocalStorage }          from 'async_hooks';
+import { AsyncLocalStorage }              from 'async_hooks';
 import { Request, Response, NextFunction } from 'express';
-import * as jwt                        from 'jsonwebtoken';
-import { env }                         from '@retail/config';
+import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from 'jose';
+import type { JWTPayload }                 from 'jose';
+import { env }                             from '@retail/config';
 import type { TenantContext, UserRole, Permission } from '@retail/types';
-import { ROLE_PERMISSIONS }            from '@retail/types';
-import { ApiError, Errors, sendError } from './api-error';
+import { ROLE_PERMISSIONS }                from '@retail/types';
+import { ApiError, Errors, sendError }     from './api-error';
 
 // ─── AsyncLocalStorage context carrier ───────────────────────────────────────
 
@@ -20,24 +21,60 @@ import { ApiError, Errors, sendError } from './api-error';
  */
 export const tenantStore = new AsyncLocalStorage<TenantContext>();
 
-// ─── JWT claim shape emitted by auth-tenant CryptoService ─────────────────────
+// ─── Supabase JWT claim shape ─────────────────────────────────────────────────
 
-interface AccessTokenClaims extends jwt.JwtPayload {
-  userId:      string;
-  tenantId:    string;
-  email:       string;
-  role:        UserRole;
-  workerTag:   string;
-  permissions: Permission[];
+/**
+ * Access-token payload issued by Supabase Auth (GoTrue).
+ *
+ * `sub`, `email`, `aud`, `iss`, `exp`, `iat` are standard. Application RBAC data
+ * (tenant + role + optional explicit permissions) is expected in `app_metadata`
+ * — set server-side via the Supabase Admin API so it cannot be tampered with by
+ * the client. `user_metadata` is accepted as a fallback for older provisioning.
+ */
+interface SupabaseAppMetadata {
+  tenant_id?:   string;
+  role?:        string;
+  permissions?: Permission[];
+  worker_tag?:  string;
 }
 
-// ─── PEM normalisation (literal \n in env vars) ───────────────────────────────
-
-function normalisePem(raw: string): string {
-  return raw.replace(/\\n/g, '\n');
+interface SupabaseClaims extends JWTPayload {
+  email?:         string;
+  app_metadata?:  SupabaseAppMetadata;
+  user_metadata?: SupabaseAppMetadata;
 }
 
-const PUBLIC_KEY = normalisePem(env.JWT_PUBLIC_KEY);
+// ─── Remote JWKS (asymmetric verification, auto-cached) ───────────────────────
+
+/**
+ * Remote JWK Set fetched from Supabase's `.well-known/jwks.json`.
+ * jose caches the keys and refreshes on unknown `kid` with a built-in cooldown,
+ * so this survives Supabase signing-key rotation without a redeploy.
+ */
+const JWKS = createRemoteJWKSet(new URL(env.SUPABASE_JWKS_URL));
+
+// Supabase signs access tokens with an asymmetric key when JWT signing keys are
+// enabled. Restrict to the algorithms Supabase actually uses — never "none".
+const ALLOWED_ALGS = ['ES256', 'RS256', 'EdDSA'];
+
+// GoTrue's issuer is the project's auth base URL.
+const ISSUER = `${env.SUPABASE_URL.replace(/\/$/u, '')}/auth/v1`;
+
+// ─── Role mapping ─────────────────────────────────────────────────────────────
+
+const VALID_ROLES: readonly UserRole[] = ['OWNER', 'MANAGER', 'STAFF', 'VIEWER'];
+
+/**
+ * Map a raw Supabase role claim to our RBAC role.
+ * Supabase's top-level `role` claim is the Postgres role ("authenticated") — NOT
+ * an application role — so we read the app role from app_metadata and normalise
+ * it to upper-case. Returns null when the value is not a recognised RBAC role.
+ */
+function toUserRole(raw: string | undefined): UserRole | null {
+  if (!raw) return null;
+  const upper = raw.toUpperCase() as UserRole;
+  return VALID_ROLES.includes(upper) ? upper : null;
+}
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
@@ -45,32 +82,34 @@ const PUBLIC_KEY = normalisePem(env.JWT_PUBLIC_KEY);
  * Tenant Context Isolation Middleware  (agents.md §1 — Zero Data Leaks)
  * ─────────────────────────────────────────────────────────────────────────────
  * Enforces the #1 architectural boundary: every authenticated request MUST
- * carry a verifiable RS256 tenant identity before any route handler executes.
+ * carry a verifiable Supabase identity before any route handler executes.
  *
  * Security properties:
- *   - tenantId is extracted ONLY from the verified JWT (prevents header spoofing)
- *   - RS256: private key stays in auth-tenant; all other services verify with
- *     the public key — compromise of a downstream service cannot mint new tokens
+ *   - Signature verified against Supabase JWKS (asymmetric) — no shared secret
+ *     lives in the app; signing-key rotation is handled transparently.
+ *   - `iss` and `aud` are pinned to this Supabase project — tokens minted for a
+ *     different project or audience are rejected.
+ *   - tenantId + role come ONLY from `app_metadata` (server-controlled) — the
+ *     client cannot spoof tenancy or elevate its role via editable user_metadata.
  *   - TenantContext is propagated via AsyncLocalStorage so repository functions
- *     never need `res` passed in — tenant isolation is automatic
- *   - Role validated against known enum; unknown roles reject the request
+ *     never need `res` passed in — tenant isolation is automatic.
  *
  * Flow:
  *   1. Extract Bearer token from Authorization header.
- *   2. Verify RS256 signature against JWT_PUBLIC_KEY.
- *   3. Validate required claims (userId, tenantId, email, role).
- *   4. Resolve permissions — use claims.permissions if present, else derive
- *      from the ROLE_PERMISSIONS matrix (backward compat with older tokens).
+ *   2. Verify signature + iss + aud against Supabase JWKS.
+ *   3. Resolve tenantId (required) and role (defaults to VIEWER when absent).
+ *   4. Resolve permissions — explicit app_metadata.permissions if present, else
+ *      derive from the ROLE_PERMISSIONS matrix.
  *   5. Build TenantContext, set on res.locals AND AsyncLocalStorage.
- *   6. Call next() inside the ALS run callback — all downstream code inherits context.
+ *   6. Call next() inside the ALS run callback — all downstream code inherits it.
  *
  * NEVER skip this middleware on any route that touches tenant data.
  */
-export function tenantContextMiddleware(
+export async function tenantContextMiddleware(
   req:  Request,
   res:  Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     sendError(res, Errors.unauthorized('Missing or malformed Authorization header'));
@@ -79,15 +118,16 @@ export function tenantContextMiddleware(
 
   const token = authHeader.slice(7);
 
-  let claims: AccessTokenClaims;
+  let claims: SupabaseClaims;
   try {
-    claims = jwt.verify(token, PUBLIC_KEY, {
-      algorithms: ['RS256'],
-      issuer:     'retail-saas',
-      audience:   'tenant-api',
-    }) as AccessTokenClaims;
+    const { payload } = await jwtVerify(token, JWKS, {
+      algorithms: ALLOWED_ALGS,
+      issuer:     ISSUER,
+      audience:   env.SUPABASE_JWT_AUD,
+    });
+    claims = payload as SupabaseClaims;
   } catch (err) {
-    if (err instanceof jwt.TokenExpiredError) {
+    if (err instanceof joseErrors.JWTExpired) {
       sendError(res, Errors.unauthorized('Token has expired. Please refresh.'));
     } else {
       sendError(res, Errors.unauthorized('Invalid token format or signature'));
@@ -95,32 +135,42 @@ export function tenantContextMiddleware(
     return;
   }
 
-  // ── Required claim validation ─────────────────────────────────────────────
-  if (!claims.userId || !claims.tenantId || !claims.email || !claims.role) {
-    sendError(res, Errors.unauthorized('Token is missing required claims'));
+  // ── Identity extraction ───────────────────────────────────────────────────
+  const meta  = claims.app_metadata ?? {};
+  const uMeta = claims.user_metadata ?? {};
+
+  const userId   = claims.sub;
+  const email    = claims.email;
+  const tenantId = meta.tenant_id ?? uMeta.tenant_id;
+
+  if (!userId || !email) {
+    sendError(res, Errors.unauthorized('Token is missing required claims (sub/email)'));
     return;
   }
 
-  const validRoles: UserRole[] = ['OWNER', 'MANAGER', 'STAFF', 'VIEWER'];
-  if (!validRoles.includes(claims.role)) {
-    sendError(res, Errors.forbidden(`Unknown role: ${claims.role}`));
+  // tenantId is mandatory — a token without one cannot be scoped to any data.
+  if (!tenantId) {
+    sendError(res, Errors.forbidden('Token has no tenant assignment (app_metadata.tenant_id)'));
     return;
   }
+
+  // Role from app_metadata; default to read-only VIEWER when unset.
+  const role = toUserRole(meta.role ?? uMeta.role) ?? 'VIEWER';
 
   // ── Permission resolution ─────────────────────────────────────────────────
-  // Use claims.permissions when present (issued by current CryptoService).
-  // Fall back to role matrix for tokens issued before permissions were added.
+  // Prefer explicit permissions provisioned in app_metadata; otherwise derive
+  // from the role matrix.
   const permissions: Permission[] =
-    Array.isArray(claims.permissions) && claims.permissions.length > 0
-      ? claims.permissions
-      : ROLE_PERMISSIONS[claims.role];
+    Array.isArray(meta.permissions) && meta.permissions.length > 0
+      ? meta.permissions
+      : ROLE_PERMISSIONS[role];
 
   const ctx: TenantContext = {
-    tenantId:    claims.tenantId,
-    userId:      claims.userId,
-    email:       claims.email,
-    role:        claims.role,
-    workerTag:   claims.workerTag ?? `${claims.role}:${claims.userId.slice(0, 8)}`,
+    tenantId,
+    userId,
+    email,
+    role,
+    workerTag: meta.worker_tag ?? `${role}:${userId.slice(0, 8)}`,
     permissions,
   };
 

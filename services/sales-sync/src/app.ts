@@ -5,6 +5,7 @@ import {
   requestId,
   tenantContextMiddleware,
   globalErrorHandler,
+  corsMiddleware,
 } from '@retail/middleware';
 import { syncRouter } from './routes/sync-router';
 
@@ -14,6 +15,7 @@ import './workers/sync-worker';
 
 const app = express();
 
+app.use(corsMiddleware);
 app.use(helmet());
 // 2 MB ceiling: generous for max-500 batch but bounded
 app.use(express.json({ limit: '2mb' }));

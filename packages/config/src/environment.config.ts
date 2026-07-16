@@ -28,7 +28,14 @@ const envSchema = z.object({
   DB_NAME:     z.string().default('retail_saas'),
   DB_USER:     z.string().min(1, 'DB_USER is required'),
   DB_PASSWORD: z.string().min(1, 'DB_PASSWORD is required'),
-  DB_SSL:      z.enum(['true', 'false']).default('false'),
+  // 'true' = TLS with cert verification; 'no-verify' = TLS without verification
+  // (needed for the Supabase pooler unless its CA bundle is supplied); 'false' = off.
+  DB_SSL:      z.enum(['true', 'false', 'no-verify']).default('false'),
+
+  // Run pending migrations eagerly on first pool import (service boot).
+  // Default OFF — migrations should be applied once via `npm run migrate`, not
+  // raced by every booting service against a shared database.
+  DB_AUTO_MIGRATE: z.enum(['true', 'false']).default('false'),
 
   // ─── Redis (general purpose — idempotency, rate-limit, cache) ─────────────
   REDIS_URL: z
@@ -42,13 +49,29 @@ const envSchema = z.object({
     .url('BULLMQ_REDIS_URL must be a valid redis:// or rediss:// URL')
     .default('redis://localhost:6379'),
 
-  // ─── JWT (asymmetric RS256) ────────────────────────────────────────────────
-  JWT_PRIVATE_KEY: z
+  // ─── Supabase ──────────────────────────────────────────────────────────────
+  // Cluster auth is verified against Supabase-issued JWTs via the JWKS endpoint.
+  // SUPABASE_SECRET_KEY is the service-role key — server-side only, never exposed.
+  SUPABASE_URL: z
     .string()
-    .min(1, 'JWT_PRIVATE_KEY is required — set to PEM-encoded RSA private key'),
-  JWT_PUBLIC_KEY: z
+    .url('SUPABASE_URL must be a valid https:// project URL'),
+  SUPABASE_JWKS_URL: z
     .string()
-    .min(1, 'JWT_PUBLIC_KEY is required — set to PEM-encoded RSA public key'),
+    .url('SUPABASE_JWKS_URL must be a valid https:// JWKS endpoint URL'),
+  SUPABASE_PUBLISHABLE_KEY: z
+    .string()
+    .min(1, 'SUPABASE_PUBLISHABLE_KEY is required (anon / publishable key)'),
+  SUPABASE_SECRET_KEY: z
+    .string()
+    .min(1, 'SUPABASE_SECRET_KEY is required (service-role / secret key — server-side only)'),
+  // Expected `aud` claim on Supabase access tokens (GoTrue default is "authenticated").
+  SUPABASE_JWT_AUD: z.string().default('authenticated'),
+
+  // ─── JWT (legacy asymmetric RS256 — auth-tenant token minting) ─────────────
+  // Optional now that verification is delegated to Supabase JWKS. auth-tenant
+  // still needs these to mint its own tokens; other services can omit them.
+  JWT_PRIVATE_KEY: z.string().optional(),
+  JWT_PUBLIC_KEY:  z.string().optional(),
   JWT_EXPIRY: z.string().default('1h'),
 
   // ─── Refresh token (symmetric HMAC fallback for refresh tokens only) ───────
