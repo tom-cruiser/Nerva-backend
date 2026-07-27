@@ -1,0 +1,24 @@
+2026/07/22-13:39:29.545 4a57 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session/Default/Local Storage/leveldb/MANIFEST-000001
+2026/07/22-13:39:29.545 4a57 Recovering log #13
+2026/07/22-13:39:29.548 4a57 Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session/Default/Local Storage/leveldb/000013.log 
+2026/07/22-14:18:04.602 4a4c Level-0 table #17: started
+2026/07/22-14:18:04.615 4a4c Level-0 table #17: 22647 bytes OK
+2026/07/22-14:18:04.618 4a4c Delete type=0 #13
+2026/07/23-12:13:16.397 4a4c Level-0 table #19: started
+2026/07/23-12:13:16.407 4a4c Level-0 table #19: 12800 bytes OK
+2026/07/23-12:13:16.411 4a4c Delete type=0 #16
+2026/07/23-12:13:16.412 4a4a Compacting 4@0 + 1@1 files
+2026/07/23-12:13:16.416 4a4a Generated table #20@0: 131 keys, 8071 bytes
+2026/07/23-12:13:16.417 4a4a Compacted 4@0 + 1@1 files => 8071 bytes
+2026/07/23-12:13:16.420 4a4a compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/07/23-12:13:16.420 4a4a Delete type=2 #14
+2026/07/23-12:13:16.421 4a4a Delete type=2 #17
+2026/07/23-12:13:16.421 4a4a Delete type=2 #8
+2026/07/23-12:13:16.421 4a4a Delete type=2 #11
+2026/07/23-12:13:16.421 4a4a Delete type=2 #19
+2026/07/23-17:33:16.194 4a4c Level-0 table #22: started
+2026/07/23-17:33:16.201 4a4c Level-0 table #22: 15054 bytes OK
+2026/07/23-17:33:16.205 4a4c Delete type=0 #18
+2026/07/23-22:43:28.977 4a4c Level-0 table #24: started
+2026/07/23-22:43:28.982 4a4c Level-0 table #24: 15130 bytes OK
+2026/07/23-22:43:28.986 4a4c Delete type=0 #21

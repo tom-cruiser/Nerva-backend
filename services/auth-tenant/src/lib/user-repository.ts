@@ -24,9 +24,9 @@ export type SafeUserRow = Omit<UserRow, 'hashed_password'>;
  * Tenant row — used to confirm a tenant exists and is active before credential check.
  */
 export interface TenantRow {
-  id:       string;
-  name:     string;
-  slug:     string;
+  id:        string;
+  name:      string;
+  slug:      string;
   is_active: boolean;
 }
 
@@ -117,8 +117,8 @@ export async function recordFailedLogin(
       [tenantId, userId],
     );
     await client.query(
-      `INSERT INTO audit_logs (tenant_id, user_id, action, worker_tag, new_values)
-       VALUES ($1, $2, 'LOGIN_FAIL', 'system', '{}')`,
+      `INSERT INTO audit_logs (tenant_id, user_id, action, entity_type, entity_id, worker_tag, new_values)
+       VALUES ($1, $2, 'LOGIN_FAIL', 'AUTH', $2, 'system', '{}')`,
       [tenantId, userId],
     );
     await client.query('COMMIT');
@@ -152,8 +152,8 @@ export async function recordSuccessfulLogin(
       [tenantId, userId],
     );
     await client.query(
-      `INSERT INTO audit_logs (tenant_id, user_id, action, worker_tag, new_values)
-       VALUES ($1, $2, 'LOGIN', 'system', '{}')`,
+      `INSERT INTO audit_logs (tenant_id, user_id, action, entity_type, entity_id, worker_tag, new_values)
+       VALUES ($1, $2, 'LOGIN', 'AUTH', $2, 'system', '{}')`,
       [tenantId, userId],
     );
     await client.query('COMMIT');
