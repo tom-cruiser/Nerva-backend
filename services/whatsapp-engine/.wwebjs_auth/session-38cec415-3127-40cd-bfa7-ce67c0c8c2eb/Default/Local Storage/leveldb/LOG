@@ -1,6 +1,6 @@
-2026/07/27-19:33:39.530 7a90 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-38cec415-3127-40cd-bfa7-ce67c0c8c2eb/Default/Local Storage/leveldb/MANIFEST-000001
-2026/07/27-19:33:39.532 7a90 Recovering log #3
-2026/07/27-19:33:39.532 7a90 Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-38cec415-3127-40cd-bfa7-ce67c0c8c2eb/Default/Local Storage/leveldb/000003.log 
-2026/07/27-19:43:49.978 7a92 Level-0 table #5: started
-2026/07/27-19:43:49.982 7a92 Level-0 table #5: 19088 bytes OK
-2026/07/27-19:43:49.986 7a92 Delete type=0 #3
+2026/07/30-18:43:48.442 a24c Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-38cec415-3127-40cd-bfa7-ce67c0c8c2eb/Default/Local Storage/leveldb/MANIFEST-000001
+2026/07/30-18:43:48.444 a24c Recovering log #7
+2026/07/30-18:43:48.449 a24c Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-38cec415-3127-40cd-bfa7-ce67c0c8c2eb/Default/Local Storage/leveldb/000007.log 
+2026/07/30-19:25:50.942 a242 Level-0 table #11: started
+2026/07/30-19:25:50.951 a242 Level-0 table #11: 13579 bytes OK
+2026/07/30-19:25:50.957 a242 Delete type=0 #7
