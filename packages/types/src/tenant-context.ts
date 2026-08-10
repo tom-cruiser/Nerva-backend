@@ -29,7 +29,10 @@ export type Permission =
   // Reports
   | 'reports:read'
   // WhatsApp
-  | 'whatsapp:send';
+  | 'whatsapp:send'
+  // Cash drawer shifts
+  | 'shifts:read'
+  | 'shifts:manage';
 
 /**
  * Permission matrix — what each role is allowed to do.
@@ -43,6 +46,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'users:read', 'users:create', 'users:update', 'users:delete',
     'reports:read',
     'whatsapp:send',
+    'shifts:read', 'shifts:manage',
   ],
   MANAGER: [
     'inventory:read', 'inventory:create', 'inventory:update',
@@ -51,17 +55,20 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'users:read',
     'reports:read',
     'whatsapp:send',
+    'shifts:read', 'shifts:manage',
   ],
   STAFF: [
     'inventory:read',
     'sales:read', 'sales:create',
     'ledger:read',
     'reports:read',
+    'shifts:read', 'shifts:manage',
   ],
   VIEWER: [
     'inventory:read',
     'sales:read',
     'ledger:read',
+    'shifts:read',
     'reports:read',
   ],
 };

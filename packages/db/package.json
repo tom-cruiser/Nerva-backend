@@ -6,9 +6,9 @@
   "scripts": {
     "build":            "tsc --build && npm run copy:migrations",
     "copy:migrations":  "mkdir -p dist/migrations && cp -r src/migrations/. dist/migrations/",
-    "migrate":          "ts-node -r dotenv/config src/migrate.ts",
-    "migrate:dry":      "ts-node -r dotenv/config src/migrate.ts -- --dry-run",
-    "migrate:rollback": "ts-node -r dotenv/config src/migrate.ts -- --rollback"
+    "migrate":          "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config src/migrate.ts",
+    "migrate:dry":      "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config src/migrate.ts -- --dry-run",
+    "migrate:rollback": "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config src/migrate.ts -- --rollback"
   },
   "dependencies": {
     "@retail/config": "*",

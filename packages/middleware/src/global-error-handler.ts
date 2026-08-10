@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ZodError } from 'zod';
 import { ApiError, sendError, Errors } from './api-error';
 
 /**
@@ -7,6 +8,10 @@ import { ApiError, sendError, Errors } from './api-error';
  *
  * Maps:
  *   - ApiError instances → their own status code and structured payload
+ *   - ZodError instances → 400 INVALID_REQUEST with the field-level issues
+ *     (several routers call `schema.parse(req.body)` directly and let the
+ *     thrown ZodError bubble here rather than pre-checking with safeParse —
+ *     without this branch those requests surfaced as an opaque 500)
  *   - Everything else   → 500 INTERNAL_ERROR (safe message, no stack leak)
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -18,6 +23,16 @@ export function globalErrorHandler(
 ): void {
   if (err instanceof ApiError) {
     sendError(res, err);
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    sendError(
+      res,
+      Errors.invalidRequest('Request validation failed', {
+        issues: err.issues.map((i) => ({ path: i.path, message: i.message })),
+      }),
+    );
     return;
   }
 

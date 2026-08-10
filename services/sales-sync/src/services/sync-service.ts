@@ -33,6 +33,46 @@ function clientIsNewer(clientTs: string, serverTs: Date | string | null): boolea
 
 // ─── Per-collection processors ────────────────────────────────────────────────
 
+class InsufficientStockError extends Error {
+  constructor(public readonly sku: string) {
+    super(`Insufficient stock for ${sku}`);
+  }
+}
+
+/**
+ * Atomically decrement stock for every line item of a sale. All-or-nothing:
+ * if any SKU is missing or doesn't have enough stock, every decrement already
+ * applied in this call is rolled back via a savepoint so the sale itself is
+ * never inserted with only some of its items reserved.
+ */
+async function reserveStockForSale(
+  client:   PoolClient,
+  tenantId: string,
+  items:    { product_sku: string; quantity: number }[],
+): Promise<void> {
+  await client.query('SAVEPOINT sale_stock_reservation');
+  try {
+    for (const item of items) {
+      const result = await client.query(
+        `UPDATE inventories
+         SET stock_quantity = stock_quantity - $3,
+             version        = version + 1,
+             updated_at     = NOW()
+         WHERE tenant_id = $1 AND product_sku = $2 AND deleted_at IS NULL
+           AND stock_quantity >= $3`,
+        [tenantId, item.product_sku, item.quantity],
+      );
+      if (!result.rowCount) {
+        throw new InsufficientStockError(item.product_sku);
+      }
+    }
+    await client.query('RELEASE SAVEPOINT sale_stock_reservation');
+  } catch (err) {
+    await client.query('ROLLBACK TO SAVEPOINT sale_stock_reservation');
+    throw err;
+  }
+}
+
 async function processSale(
   client:    PoolClient,
   change:    SyncChangeInput,
@@ -82,6 +122,19 @@ async function processSale(
       accepted.push({
         id: change.id, server_id: existing.rows[0].id,
         action: SyncAction.CREATE, collection: SyncCollection.SALES,
+      });
+      return;
+    }
+
+    try {
+      await reserveStockForSale(client, tenantId, d.items_sold);
+    } catch (err) {
+      const reason = err instanceof InsufficientStockError
+        ? err.message
+        : 'Failed to reserve stock for this sale';
+      rejected.push({
+        id: change.id, reason,
+        collection: SyncCollection.SALES, action: SyncAction.CREATE,
       });
       return;
     }

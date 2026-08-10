@@ -96,8 +96,10 @@ syncRouter.post(
 
       // ── 6. Enqueue ────────────────────────────────────────────────────────
       const job = await syncQueue.add('sync-batch', jobPayload, {
-        // Job ID keyed on tenant + mutation for BullMQ-level dedup
-        jobId: `${ctx.tenantId}:${mutationId}`,
+        // Job ID keyed on tenant + mutation for BullMQ-level dedup.
+        // BullMQ rejects ':' in custom job ids ("Custom Id cannot contain :"),
+        // so join with '__' instead — both halves are UUIDs, never re-split.
+        jobId: `${ctx.tenantId}__${mutationId}`,
       });
 
       // ── 7. Fast-path: wait for completion ─────────────────────────────────

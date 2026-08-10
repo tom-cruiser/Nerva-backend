@@ -1,0 +1,5 @@
+2026/08/10-20:33:26.877 51fe Creating DB /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-9cf64a74-6226-4a4c-a6ab-e81fbd86533f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb since it was missing.
+2026/08/10-20:33:26.891 51fe Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-9cf64a74-6226-4a4c-a6ab-e81fbd86533f/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/08/10-22:07:44.404 5200 Level-0 table #5: started
+2026/08/10-22:07:44.441 5200 Level-0 table #5: 1131518 bytes OK
+2026/08/10-22:07:44.445 5200 Delete type=0 #3

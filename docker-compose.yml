@@ -121,6 +121,22 @@ services:
       - nerva-network
     restart: unless-stopped
 
+  shifts:
+    build:
+      context: .
+      dockerfile: services/shifts/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3006
+      NODE_ENV: development
+    ports:
+      - "3006:3006"
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
+
   # ── API Gateway (nginx) — single entry point for all backend services ────────
   gateway:
     image: nginx:1.25-alpine
@@ -134,6 +150,7 @@ services:
       - sales-sync
       - ledger-payments
       - whatsapp-engine
+      - shifts
     networks:
       - nerva-network
     restart: unless-stopped
