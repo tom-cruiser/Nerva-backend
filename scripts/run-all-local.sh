@@ -20,6 +20,7 @@ SERVICES=(
     "ledger-payments:3004"
     "whatsapp-engine:3005"
     "shifts:3006"
+    "superadmin:3007"
 )
 GATEWAY_PORT=8080
 REDIS_PORT=6379
@@ -366,6 +367,7 @@ main() {
     echo "  📒 Ledger:     http://localhost:$GATEWAY_PORT/api/v1/ledger/"
     echo "  💬 WhatsApp:   http://localhost:$GATEWAY_PORT/api/v1/whatsapp/"
     echo "  🕒 Shifts:     http://localhost:$GATEWAY_PORT/api/v1/shifts/"
+    echo "  🛡️  Superadmin: http://localhost:$GATEWAY_PORT/api/v1/superadmin/  (requires superadmin:access — see services/superadmin/scripts/grant-superadmin.ts)"
     echo ""
     echo -e "${BLUE}Direct service ports (for debugging):${NC}"
     for service_info in "${SERVICES[@]}"; do

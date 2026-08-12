@@ -88,6 +88,20 @@ export async function closePool(): Promise<void> {
   await pool.end();
 }
 
+/**
+ * Point-in-time connection pool stats, for the superadmin health-monitor
+ * endpoint — exposes the numbers, not the pg.Pool instance itself, so
+ * callers can't accidentally end()/reconfigure the shared pool.
+ */
+export function getPoolStats(): { total: number; idle: number; waiting: number; max: number } {
+  return {
+    total:   pool.totalCount,
+    idle:    pool.idleCount,
+    waiting: pool.waitingCount,
+    max:     20, // mirrors the `max` set on both Pool constructors above
+  };
+}
+
 // Eager auto-migration on first pool import.
 //
 // OFF by default: with a shared database, every booting service would otherwise

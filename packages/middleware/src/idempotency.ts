@@ -55,18 +55,28 @@ export function idempotency(redisClient: Redis) {
 
     const key = `idempotency:${ctx.tenantId}:${mutationId}`;
 
-    // ── Check for existing result ─────────────────────────────────────────────
-    const existing = await redisClient.get(key);
+    // ── Atomically acquire the processing lock ────────────────────────────────
+    // SET ... NX is a single Redis command, so this is race-free: only one of
+    // N concurrent requests sharing this key can ever win the lock. Without
+    // NX, a GET-then-SET here would let two concurrent duplicate requests both
+    // observe "no existing key" and both fall through to the route handler.
+    const acquired = await redisClient.set(key, LOCK_VALUE, 'EX', 30, 'NX');
 
-    if (existing !== null && existing !== LOCK_VALUE) {
-      // Replay the previously stored response
-      res.setHeader('X-Idempotency-Replayed', 'true');
-      res.status(200).json(JSON.parse(existing) as unknown);
-      return;
-    }
+    if (acquired !== 'OK') {
+      // We lost the race — someone else holds (or held) this key. Inspect it
+      // to decide whether to replay a finished result or report "in flight".
+      const existing = await redisClient.get(key);
 
-    if (existing === LOCK_VALUE) {
-      // Another in-flight request is already processing this mutation
+      if (existing !== null && existing !== LOCK_VALUE) {
+        // Replay the previously stored response
+        res.setHeader('X-Idempotency-Replayed', 'true');
+        res.status(200).json(JSON.parse(existing) as unknown);
+        return;
+      }
+
+      // Either still processing (LOCK_VALUE) or the lock expired in the
+      // instant between our failed SET and this GET — in both cases it is
+      // not safe to proceed without our own lock, so ask the client to retry.
       sendError(
         res,
         Errors.conflict('This mutation is currently being processed. Retry in a moment.', {
@@ -75,9 +85,6 @@ export function idempotency(redisClient: Redis) {
       );
       return;
     }
-
-    // ── Set processing lock (NX = only if key does not exist) ────────────────
-    await redisClient.set(key, LOCK_VALUE, 'EX', 30); // 30 s processing window
 
     // ── Intercept the response to store the final result ─────────────────────
     const originalJson = res.json.bind(res);

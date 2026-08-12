@@ -7,3 +7,7 @@ node_modules
 .gitignore
 .eslintrc.json
 README.md
+
+# secrets — never bake key material into an image
+*.pem
+*.key

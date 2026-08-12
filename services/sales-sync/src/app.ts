@@ -15,6 +15,10 @@ import './workers/sync-worker';
 
 const app = express();
 
+// Trust exactly one proxy hop (the nginx gateway) so req.ip reflects the real
+// client instead of always resolving to the gateway container's address.
+app.set('trust proxy', 1);
+
 app.use(corsMiddleware);
 app.use(helmet());
 // 2 MB ceiling: generous for max-500 batch but bounded
@@ -28,6 +32,6 @@ app.get('/health', (_req, res) => {
 // All sync routes require a verified JWT tenant context
 app.use('/api/v1/sync', tenantContextMiddleware, syncRouter);
 
-app.use(globalErrorHandler);
+app.use(globalErrorHandler('sales-sync'));
 
 export { app };

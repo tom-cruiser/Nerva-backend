@@ -1,11 +1,21 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { getClient } from '@retail/db';
-import { getTenantContext } from '@retail/middleware';
+import { getTenantContext, requirePermission, idempotency } from '@retail/middleware';
 import { Errors, sendError } from '@retail/middleware';
+import { redis } from '@retail/redis';
 import { v4 as uuidv4 } from 'uuid';
 
 const router = Router();
+
+/**
+ * Idempotency middleware bound to this service's Redis client.
+ * Mounted on every mutating route (skill-2: idempotency.md §1) — requires
+ * the caller to send an `X-Client-Mutation-Id` header; a retried request
+ * with the same id replays the cached result instead of re-executing the
+ * mutation.
+ */
+const idempotent = idempotency(redis);
 
 // ─── TEST ROUTE ──────────────────────────────────────────────────────────────
 router.get('/test', (req: Request, res: Response) => {
@@ -47,6 +57,26 @@ const paymentSchema = z.object({
   method: z.enum(['CASH', 'MOMO', 'BANK_TRANSFER']),
   note: z.string().optional(),
   clientMutationId: z.string().uuid(),
+  // Required when method === 'MOMO' — the provider's transaction reference,
+  // verified against `mobile_money_transactions` before any ledger mutation
+  // (skill-3: momo-ledger.md §2 — never trust a client-claimed MoMo payment).
+  external_transaction_id: z.string().min(1).optional(),
+}).refine(
+  (d) => d.method !== 'MOMO' || !!d.external_transaction_id,
+  {
+    message: 'external_transaction_id is required when method is MOMO',
+    path: ['external_transaction_id'],
+  },
+);
+
+// Verifies a MoMo receipt against `mobile_money_transactions` before crediting
+// the ledger. Client supplies the amount it believes was paid; the row's
+// recorded amount is the source of truth and must match.
+const momoPaymentSchema = z.object({
+  customerId: z.string().uuid(),
+  amount: z.number().positive(),
+  external_transaction_id: z.string().min(1),
+  client_mutation_id: z.string().uuid(),
 });
 
 const creditSchema = z.object({
@@ -88,6 +118,107 @@ function formatLastActivity(date: Date | string): string {
   } catch {
     return 'Unknown';
   }
+}
+
+/**
+ * Look up + row-lock a `mobile_money_transactions` receipt for this tenant and
+ * verify it actually backs the payment being applied (skill-3: momo-ledger.md
+ * §2 — "Never directly modify money balances without checking for verifiable
+ * processing hooks or callback receipts first.").
+ *
+ * Returns the verified row's id/amount on success, or a human-readable error
+ * string when verification fails (no row, wrong status, already reconciled,
+ * or amount mismatch). Callers MUST run this inside the same BEGIN/COMMIT
+ * transaction as the ledger mutation and ROLLBACK on failure.
+ */
+async function verifyAndLockMomoTransaction(
+  client: Awaited<ReturnType<typeof getClient>>,
+  tenantId: string,
+  externalTransactionId: string,
+  expectedAmount: number,
+): Promise<{ id: string; amount: number } | { error: string }> {
+  const result = await client.query(
+    `SELECT id, status, reconciliation_status, amount
+     FROM mobile_money_transactions
+     WHERE tenant_id = $1 AND external_transaction_id = $2
+     FOR UPDATE`,
+    [tenantId, externalTransactionId],
+  );
+
+  if (result.rows.length === 0) {
+    return {
+      error: `No verified mobile money transaction found for external_transaction_id "${externalTransactionId}"`,
+    };
+  }
+
+  const momo = result.rows[0];
+
+  if (momo.status !== 'COMPLETED') {
+    return {
+      error: `Mobile money transaction "${externalTransactionId}" is not COMPLETED (current status: ${momo.status})`,
+    };
+  }
+
+  if (momo.reconciliation_status === 'RECONCILED') {
+    return {
+      error: `Mobile money transaction "${externalTransactionId}" has already been reconciled`,
+    };
+  }
+
+  const momoAmount = Number(momo.amount);
+  if (Math.abs(momoAmount - expectedAmount) > 0.005) {
+    return {
+      error: `Mobile money transaction amount (${momoAmount}) does not match the requested payment amount (${expectedAmount})`,
+    };
+  }
+
+  return { id: momo.id, amount: momoAmount };
+}
+
+/**
+ * Move money on the ledger — insert the PAYMENT entry and debit the customer's
+ * balance. Shared by every payment path (CASH, verified MOMO, BANK_TRANSFER)
+ * so a verified MoMo receipt is applied through the exact same code as a cash
+ * payment, differing only in the verification gate that runs before this is
+ * called and the reconciliation update that runs after.
+ * MUST be called inside an open BEGIN/COMMIT transaction, after the caller has
+ * SELECT ... FOR UPDATE-locked the customer_ledger row.
+ */
+async function applyLedgerPayment(
+  client: Awaited<ReturnType<typeof getClient>>,
+  params: {
+    tenantId: string;
+    ledgerId: string;
+    amount: number;
+    currentBalance: number;
+    description: string;
+    workerTag: string;
+  },
+): Promise<{ txId: string; newBalance: number }> {
+  const txId = uuidv4();
+  const newBalance = params.currentBalance - params.amount;
+
+  await client.query(
+    `INSERT INTO ledger_entries (
+       id, tenant_id, customer_ledger_id, entry_type,
+       amount, balance_after, description, worker_tag, created_at
+     )
+     VALUES ($1, $2, $3, 'PAYMENT', $4, $5, $6, $7, NOW())`,
+    [txId, params.tenantId, params.ledgerId, params.amount, newBalance, params.description, params.workerTag],
+  );
+
+  await client.query(
+    `UPDATE customer_ledger
+     SET balance = balance - $1,
+         total_payments_received = total_payments_received + $1,
+         last_payment_date = NOW(),
+         updated_at = NOW(),
+         version = version + 1
+     WHERE id = $2 AND tenant_id = $3`,
+    [params.amount, params.ledgerId, params.tenantId],
+  );
+
+  return { txId, newBalance };
 }
 
 function generateCSV(data: Array<Record<string, any>>): string {
@@ -161,7 +292,7 @@ router.get('/customers', async (req: Request, res: Response, next: NextFunction)
 
 // ─── POST /api/v1/ledger/customers ──────────────────────────────────────────
 
-router.post('/customers', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/customers', requirePermission('ledger:create'), idempotent, async (req: Request, res: Response, next: NextFunction) => {
   console.log('[ledger] POST /customers - Request received');
   console.log('[ledger] Body:', req.body);
   
@@ -342,7 +473,7 @@ router.get('/customers/:customerId', async (req: Request, res: Response, next: N
 
 // ─── PATCH /api/v1/ledger/customers/:customerId ───────────────────────────
 
-router.patch('/customers/:customerId', async (req: Request, res: Response, next: NextFunction) => {
+router.patch('/customers/:customerId', requirePermission('ledger:update'), idempotent, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = updateCustomerSchema.parse(req.body);
     const ctx = getTenantContext(res);
@@ -600,7 +731,7 @@ router.get('/transactions', async (req: Request, res: Response, next: NextFuncti
 // ─── POST /api/v1/ledger/payments ──────────────────────────────────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.post('/payments', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/payments', requirePermission('ledger:payment'), idempotent, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = paymentSchema.parse(req.body);
     const ctx = getTenantContext(res);
@@ -610,11 +741,14 @@ router.post('/payments', async (req: Request, res: Response, next: NextFunction)
     try {
       await client.query('BEGIN');
 
+      // Lock the ledger row for the duration of the transaction so a
+      // concurrent payment/credit request can't read the same stale balance
+      // (TOCTOU race) before this one commits.
       const ledgerResult = await client.query(
         `SELECT id, customer_id, balance, total_payments_received
          FROM customer_ledger
          WHERE customer_id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-         LIMIT 1`,
+         FOR UPDATE`,
         [body.customerId, orgId],
       );
 
@@ -626,53 +760,61 @@ router.post('/payments', async (req: Request, res: Response, next: NextFunction)
 
       const ledger = ledgerResult.rows[0];
       const currentBalance = Number(ledger.balance || 0);
-      
+
       if (body.amount > currentBalance) {
         await client.query('ROLLBACK');
         sendError(res, Errors.invalidRequest('Payment exceeds outstanding debt'));
         return;
       }
 
-      const txId = uuidv4();
-      
-      await client.query(
-        `INSERT INTO ledger_entries (
-           id, tenant_id, customer_ledger_id, entry_type, 
-           amount, balance_after, description, worker_tag, created_at
-         )
-         VALUES ($1, $2, $3, 'PAYMENT', $4, $5, $6, $7, NOW())`,
-        [
-          txId, 
-          orgId, 
-          ledger.id, 
-          body.amount, 
-          currentBalance - body.amount,
-          `Payment of ${body.amount} via ${body.method}`,
-          ctx.workerTag
-        ],
-      );
+      // MoMo payments are never trusted as client-claimed input — verify a
+      // matching COMPLETED, not-yet-reconciled receipt exists and its amount
+      // matches before touching the ledger (skill-3: momo-ledger.md §2).
+      let momoTransactionId: string | undefined;
+      if (body.method === 'MOMO') {
+        const verification = await verifyAndLockMomoTransaction(
+          client,
+          orgId,
+          body.external_transaction_id as string,
+          body.amount,
+        );
+        if ('error' in verification) {
+          await client.query('ROLLBACK');
+          sendError(res, Errors.invalidRequest(`MoMo verification failed: ${verification.error}`));
+          return;
+        }
+        momoTransactionId = verification.id;
+      }
 
-      await client.query(
-        `UPDATE customer_ledger 
-         SET balance = balance - $1,
-             total_payments_received = total_payments_received + $1,
-             last_payment_date = NOW(),
-             updated_at = NOW(),
-             version = version + 1
-         WHERE id = $2 AND tenant_id = $3`,
-        [body.amount, ledger.id, orgId],
-      );
+      const { txId, newBalance } = await applyLedgerPayment(client, {
+        tenantId: orgId,
+        ledgerId: ledger.id,
+        amount: body.amount,
+        currentBalance,
+        description: `Payment of ${body.amount} via ${body.method}`,
+        workerTag: ctx.workerTag,
+      });
+
+      if (momoTransactionId) {
+        await client.query(
+          `UPDATE mobile_money_transactions
+           SET reconciliation_status = 'RECONCILED', reconciled_at = NOW(), updated_at = NOW()
+           WHERE id = $1 AND tenant_id = $2`,
+          [momoTransactionId, orgId],
+        );
+      }
 
       await client.query(
         `INSERT INTO audit_logs (tenant_id, entity_type, entity_id, action, worker_tag, new_values)
          VALUES ($1, 'ledger', $2, 'PAYMENT', $3, $4::jsonb)`,
-        [orgId, ledger.customer_id, ctx.workerTag, JSON.stringify({ 
-          payment_tx: txId, 
-          amount: body.amount, 
+        [orgId, ledger.customer_id, ctx.workerTag, JSON.stringify({
+          payment_tx: txId,
+          amount: body.amount,
           method: body.method,
           note: body.note,
+          external_transaction_id: body.external_transaction_id,
           balance_before: currentBalance,
-          balance_after: currentBalance - body.amount,
+          balance_after: newBalance,
         })],
       );
 
@@ -681,7 +823,7 @@ router.post('/payments', async (req: Request, res: Response, next: NextFunction)
       res.json({
         success: true,
         transactionId: txId,
-        newBalance: currentBalance - body.amount,
+        newBalance,
       });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -697,7 +839,7 @@ router.post('/payments', async (req: Request, res: Response, next: NextFunction)
 // ─── POST /api/v1/ledger/customers/:customerId/credit ─────────────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.post('/customers/:customerId/credit', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/customers/:customerId/credit', requirePermission('ledger:credit'), idempotent, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = creditSchema.parse(req.body);
     const ctx = getTenantContext(res);
@@ -707,11 +849,13 @@ router.post('/customers/:customerId/credit', async (req: Request, res: Response,
     try {
       await client.query('BEGIN');
 
+      // Lock the ledger row so a concurrent payment/credit can't read a
+      // stale balance before this transaction commits (TOCTOU race).
       let ledgerResult = await client.query(
         `SELECT id, customer_id, balance, total_credit_given
          FROM customer_ledger
          WHERE customer_id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-         LIMIT 1`,
+         FOR UPDATE`,
         [customerId, ctx.tenantId],
       );
 
@@ -854,7 +998,7 @@ router.get('/summary', async (req: Request, res: Response, next: NextFunction) =
 // ─── POST /api/v1/ledger/settle ─────────────────────────────────────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.post('/settle', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/settle', requirePermission('ledger:payment'), idempotent, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = settleSchema.parse(req.body);
     const ctx = getTenantContext(res);
@@ -864,11 +1008,13 @@ router.post('/settle', async (req: Request, res: Response, next: NextFunction) =
       await client.query('BEGIN');
       await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
 
+      // Lock the ledger row so a concurrent payment/settle can't read a
+      // stale balance before this transaction commits (TOCTOU race).
       const ledgerQ = await client.query(
-        `SELECT id, customer_id, balance 
-         FROM customer_ledger 
+        `SELECT id, customer_id, balance
+         FROM customer_ledger
          WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-         LIMIT 1`,
+         FOR UPDATE`,
         [body.ledger_id, orgId],
       );
       if (ledgerQ.rows.length === 0) {
@@ -974,25 +1120,106 @@ router.post('/settle', async (req: Request, res: Response, next: NextFunction) =
 });
 
 // ─── POST /api/v1/ledger/payments/momo ─────────────────────────────────────
+// Reconciles a MoMo payment against a verified `mobile_money_transactions`
+// receipt and applies it to the customer's ledger. Never trusts the client's
+// claimed amount/status — the receipt row (status='COMPLETED', not already
+// RECONCILED, amount matching) is the sole source of truth
+// (skill-3: momo-ledger.md §2).
 
-router.post('/payments/momo', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/payments/momo', requirePermission('ledger:payment'), idempotent, async (req: Request, res: Response, next: NextFunction) => {
   try {
+    const body = momoPaymentSchema.parse(req.body);
     const ctx = getTenantContext(res);
-    const { transaction_id, amount, phone_number, status } = req.body;
+    const orgId = ctx.tenantId;
+    const client = await getClient();
 
-    if (!transaction_id || !amount) {
-      sendError(res, Errors.invalidRequest('transaction_id and amount are required'));
-      return;
+    try {
+      await client.query('BEGIN');
+
+      // Lock the ledger row so a concurrent payment/credit can't read a
+      // stale balance before this transaction commits (TOCTOU race).
+      const ledgerResult = await client.query(
+        `SELECT id, customer_id, balance, total_payments_received
+         FROM customer_ledger
+         WHERE customer_id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [body.customerId, orgId],
+      );
+
+      if (ledgerResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Customer not found'));
+        return;
+      }
+
+      const ledger = ledgerResult.rows[0];
+      const currentBalance = Number(ledger.balance || 0);
+
+      if (body.amount > currentBalance) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.invalidRequest('Payment exceeds outstanding debt'));
+        return;
+      }
+
+      const verification = await verifyAndLockMomoTransaction(
+        client,
+        orgId,
+        body.external_transaction_id,
+        body.amount,
+      );
+
+      if ('error' in verification) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.invalidRequest(`MoMo verification failed: ${verification.error}`));
+        return;
+      }
+
+      const { txId, newBalance } = await applyLedgerPayment(client, {
+        tenantId: orgId,
+        ledgerId: ledger.id,
+        amount: body.amount,
+        currentBalance,
+        description: `MoMo payment (external_transaction_id=${body.external_transaction_id})`,
+        workerTag: ctx.workerTag,
+      });
+
+      await client.query(
+        `UPDATE mobile_money_transactions
+         SET reconciliation_status = 'RECONCILED', reconciled_at = NOW(), updated_at = NOW()
+         WHERE id = $1 AND tenant_id = $2`,
+        [verification.id, orgId],
+      );
+
+      await client.query(
+        `INSERT INTO audit_logs (tenant_id, entity_type, entity_id, action, worker_tag, new_values)
+         VALUES ($1, 'ledger', $2, 'PAYMENT', $3, $4::jsonb)`,
+        [orgId, ledger.customer_id, ctx.workerTag, JSON.stringify({
+          payment_tx: txId,
+          amount: body.amount,
+          method: 'MOMO',
+          external_transaction_id: body.external_transaction_id,
+          momo_transaction_id: verification.id,
+          balance_before: currentBalance,
+          balance_after: newBalance,
+        })],
+      );
+
+      await client.query('COMMIT');
+
+      res.json({
+        status: 'RECONCILED',
+        transactionId: txId,
+        externalTransactionId: body.external_transaction_id,
+        amount: body.amount,
+        newBalance,
+        reconciledAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
-
-    res.json({
-      status: 'RECONCILED',
-      transaction_id,
-      amount,
-      phone_number,
-      reconciled_at: new Date().toISOString(),
-      message: 'MoMo payment reconciled successfully (stub)',
-    });
   } catch (err) {
     next(err);
   }

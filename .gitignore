@@ -5,6 +5,13 @@ dist/
 *.log
 coverage/
 
+# secrets — never commit key material. private.pem/public.pem were already
+# committed in an earlier commit and must be treated as compromised and
+# rotated by the infra team; this rule only prevents a regenerated key from
+# being committed again.
+*.pem
+*.key
+
 # build artifacts
 *.tsbuildinfo
 

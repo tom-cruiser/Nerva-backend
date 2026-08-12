@@ -1,7 +1,7 @@
 // services/whatsapp-engine/src/routes/webhook-routes.ts
 import { Router } from 'express';
 import { getSession, listSessions } from '../lib/whatsapp-client';
-import { getTenantContext } from '@retail/middleware';
+import { getTenantContext, requireSuperadmin, tenantContextMiddleware } from '@retail/middleware';
 
 const webhookRouter = Router();
 
@@ -190,33 +190,23 @@ webhookRouter.post('/session', async (req, res) => {
 // ============================================
 
 /**
- * GET /events - Get webhook events for a tenant
+ * GET /events - Get webhook events across all tenants (Superadmin only)
+ *
+ * This endpoint intentionally has full cross-tenant visibility (including
+ * message bodies), so it requires a genuine platform superadmin. It used to
+ * trust a spoofable `x-admin: true` header as proof of admin status whenever
+ * there was no tenant context (which was always, since this router is
+ * mounted before any auth middleware) - that has been removed.
  */
-webhookRouter.get('/events', async (req, res) => {
+webhookRouter.get('/events', tenantContextMiddleware, requireSuperadmin(), async (_req, res) => {
   try {
-    let tenantId: string | undefined;
-    
-    try {
-      const ctx = getTenantContext(res);
-      tenantId = ctx.tenantId;
-    } catch (ctxErr) {
-      // If no tenant context, check if admin
-      const isAdmin = req.headers['x-admin'] === 'true';
-      if (!isAdmin) {
-        return res.status(401).json({
-          success: false,
-          error: 'Authentication required'
-        });
-      }
-    }
+    const events = getEvents(undefined);
 
-    const events = getEvents(tenantId);
-    
     res.json({
       success: true,
       events,
       count: events.length,
-      tenantId: tenantId || 'all',
+      tenantId: 'all',
       timestamp: new Date().toISOString()
     });
   } catch (err: any) {

@@ -35,6 +35,18 @@ export const Errors = {
                    d: Record<string, unknown> = {})  => new ApiError(msg, 'CONFLICT',       409, d),
   invalidRequest: (msg: string,
                    d: Record<string, unknown> = {})  => new ApiError(msg, 'INVALID_REQUEST', 400, d),
+  // Reuses the existing RATE_LIMITED code (see packages/middleware/src/rate-limit.ts,
+  // which throws this same code/status directly) rather than adding a new one.
+  tooManyRequests: (msg = 'Too many requests',
+                    d: Record<string, unknown> = {}) => new ApiError(msg, 'RATE_LIMITED', 429, d),
+  serviceUnavailable: (msg = 'Service temporarily unavailable',
+                       d: Record<string, unknown> = {}) => new ApiError(msg, 'SERVICE_UNAVAILABLE', 503, d),
+  // 423 Locked — the resource exists but is administratively blocked from
+  // being acted on right now. Used for tenant-suspension enforcement (see
+  // tenant-context.ts) rather than 403 Forbidden, so clients can tell
+  // "you're not allowed" apart from "your whole account is suspended".
+  locked:         (msg = 'This resource is locked',
+                   d: Record<string, unknown> = {})  => new ApiError(msg, 'LOCKED', 423, d),
   internal:       (msg = 'Internal server error')    => new ApiError(msg, 'INTERNAL_ERROR', 500),
 };
 

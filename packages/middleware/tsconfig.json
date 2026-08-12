@@ -7,6 +7,8 @@
   },
   "references": [
     { "path": "../config" },
+    { "path": "../db" },
+    { "path": "../redis" },
     { "path": "../types" }
   ],
   "include": ["src/**/*"]

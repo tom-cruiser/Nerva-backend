@@ -19,6 +19,8 @@ export type Permission =
   | 'sales:void'
   // Ledger
   | 'ledger:read'
+  | 'ledger:create'
+  | 'ledger:update'
   | 'ledger:credit'
   | 'ledger:payment'
   // Users / Admin
@@ -32,7 +34,25 @@ export type Permission =
   | 'whatsapp:send'
   // Cash drawer shifts
   | 'shifts:read'
-  | 'shifts:manage';
+  | 'shifts:manage'
+  // Cluster-level superadmin (see @retail/middleware requireSuperadmin()).
+  // Deliberately NOT granted by ROLE_PERMISSIONS below — no tenant role
+  // (including OWNER) implies it. It only ever reaches a token via
+  // app_metadata.permissions set directly through the Supabase Admin API
+  // (see services/superadmin/scripts/grant-superadmin.ts) — a superadmin is
+  // a platform operator, not a role within any one tenant.
+  | 'superadmin:access'
+  // Platform-staff RBAC, finer-grained than the single 'superadmin:access'
+  // permission above — same deliberately-not-granted-by-ROLE_PERMISSIONS
+  // rule applies. 'platform:support' is read-only across every tenant
+  // (health/analytics/error-log/tenant list); 'platform:billing' additionally
+  // covers subscriptions/feature-flags/billing-event writes. Neither implies
+  // 'superadmin:access' — tenant lifecycle (suspend/delete/purge), platform
+  // settings, staff management, and support-token issuance stay
+  // superadmin-only. See requirePlatformPermission() in @retail/middleware
+  // and services/superadmin/src/routes/platform-ops-router.ts (grant/revoke).
+  | 'platform:support'
+  | 'platform:billing';
 
 /**
  * Permission matrix — what each role is allowed to do.
@@ -42,7 +62,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   OWNER: [
     'inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete',
     'sales:read', 'sales:create', 'sales:void',
-    'ledger:read', 'ledger:credit', 'ledger:payment',
+    'ledger:read', 'ledger:create', 'ledger:update', 'ledger:credit', 'ledger:payment',
     'users:read', 'users:create', 'users:update', 'users:delete',
     'reports:read',
     'whatsapp:send',
@@ -51,7 +71,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   MANAGER: [
     'inventory:read', 'inventory:create', 'inventory:update',
     'sales:read', 'sales:create', 'sales:void',
-    'ledger:read', 'ledger:credit', 'ledger:payment',
+    'ledger:read', 'ledger:create', 'ledger:update', 'ledger:credit', 'ledger:payment',
     'users:read',
     'reports:read',
     'whatsapp:send',
@@ -93,4 +113,14 @@ export interface TenantContext {
   workerTag:   string;
   /** Resolved permission set for the request lifecycle. */
   permissions: Permission[];
+  /**
+   * Set when this request was authenticated via a short-lived, read-only
+   * support-impersonation token (X-Support-Token) rather than a real
+   * Supabase-issued JWT — see tenant-context.ts and
+   * services/superadmin/src/routes/settings-router.ts (issuance). Route
+   * handlers that mutate data should treat this as an additional signal to
+   * refuse, on top of the fact that such a context always carries only
+   * VIEWER-level permissions.
+   */
+  viaSupportToken?: boolean;
 }

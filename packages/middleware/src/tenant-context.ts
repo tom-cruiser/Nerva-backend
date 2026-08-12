@@ -1,8 +1,11 @@
 import { AsyncLocalStorage }              from 'async_hooks';
+import { createHash }                     from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { createRemoteJWKSet, jwtVerify, errors as joseErrors } from 'jose';
 import type { JWTPayload }                 from 'jose';
 import { env }                             from '@retail/config';
+import { getClient }                       from '@retail/db';
+import { redis }                           from '@retail/redis';
 import type { TenantContext, UserRole, Permission } from '@retail/types';
 import { ROLE_PERMISSIONS }                from '@retail/types';
 import { ApiError, Errors, sendError }     from './api-error';
@@ -29,7 +32,8 @@ export const tenantStore = new AsyncLocalStorage<TenantContext>();
  * `sub`, `email`, `aud`, `iss`, `exp`, `iat` are standard. Application RBAC data
  * (tenant + role + optional explicit permissions) is expected in `app_metadata`
  * — set server-side via the Supabase Admin API so it cannot be tampered with by
- * the client. `user_metadata` is accepted as a fallback for older provisioning.
+ * the client. There is NO fallback to `user_metadata` — see the SupabaseClaims
+ * comment below.
  */
 interface SupabaseAppMetadata {
   tenant_id?:   string;
@@ -41,7 +45,11 @@ interface SupabaseAppMetadata {
 interface SupabaseClaims extends JWTPayload {
   email?:         string;
   app_metadata?:  SupabaseAppMetadata;
-  user_metadata?: SupabaseAppMetadata;
+  // NOTE: user_metadata is intentionally NOT part of the trusted claim shape.
+  // It is editable by the end user via the standard Supabase client SDK
+  // (`supabase.auth.updateUser({ data: {...} })`), so tenancy/role must never
+  // be resolved from it — see the security-properties note on
+  // tenantContextMiddleware below.
 }
 
 // ─── Remote JWKS (asymmetric verification, auto-cached) ───────────────────────
@@ -76,6 +84,178 @@ function toUserRole(raw: string | undefined): UserRole | null {
   return VALID_ROLES.includes(upper) ? upper : null;
 }
 
+// ─── Tenant lifecycle enforcement ─────────────────────────────────────────────
+//
+// A superadmin can move a tenant to SUSPENDED or DELETED (see
+// services/superadmin). That state must take effect immediately for every
+// cashier/manager/owner of that tenant, on every service — not just the next
+// time their JWT happens to expire and they re-authenticate. Since JWT
+// verification above is stateless (no DB round-trip), tenant status has to
+// be checked separately, here, on every request that resolves a tenant.
+
+export type TenantStatus = 'ACTIVE' | 'SUSPENDED' | 'DELETED';
+
+/**
+ * Cache key for a tenant's lifecycle status. Exported so the superadmin
+ * service can write straight to this same key — invalidating/updating the
+ * cache as PART of the suspend/unblock/delete transaction, rather than
+ * relying solely on TTL expiry, is what makes enforcement "immediate"
+ * instead of "eventually, within TENANT_STATUS_CACHE_TTL_SECONDS".
+ */
+export function tenantStatusCacheKey(tenantId: string): string {
+  return `tenant:status:${tenantId}`;
+}
+
+/** Safety-net TTL only — the cache is actively kept fresh by superadmin
+ *  lifecycle actions writing directly to tenantStatusCacheKey(). This just
+ *  bounds the damage if a write-through invalidation is ever missed (e.g. a
+ *  crash between the Postgres COMMIT and the cache write). Exported so the
+ *  superadmin service's own write-through `redis.set(...)` uses the exact
+ *  same TTL, rather than a second, possibly-drifting magic number. */
+export const TENANT_STATUS_CACHE_TTL_SECONDS = 60;
+
+function isTenantStatus(value: unknown): value is TenantStatus {
+  return value === 'ACTIVE' || value === 'SUSPENDED' || value === 'DELETED';
+}
+
+/**
+ * A superadmin (see requireSuperadmin()) is a platform operator, not a role
+ * within any one tenant — granted purely via app_metadata.permissions (see
+ * services/superadmin/scripts/grant-superadmin.ts), independent of
+ * tenant_id/role. This nil UUID stands in for "no tenant" so such a token
+ * can still pass the tenantId-mandatory check below without being treated
+ * as belonging to a real tenant anywhere else in the cluster: no row in
+ * `tenants` will ever have this id, so resolveTenantStatus() reports it
+ * ACTIVE (safe default), and any tenant-scoped query using it as a WHERE
+ * clause returns zero rows rather than leaking another tenant's data.
+ */
+export const PLATFORM_SENTINEL_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Resolves a tenant's current lifecycle status, Redis-first with a Postgres
+ * fallback. Never throws — a Redis or Postgres outage fails toward ACTIVE
+ * (availability) rather than locking out every tenant on the platform
+ * because of an infrastructure blip; genuine suspensions/deletions are a
+ * deliberate, low-frequency write that will be reflected as soon as either
+ * store is reachable again.
+ */
+async function resolveTenantStatus(tenantId: string): Promise<TenantStatus> {
+  const cacheKey = tenantStatusCacheKey(tenantId);
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (isTenantStatus(cached)) return cached;
+  } catch (err) {
+    console.error('[tenant-context] Redis unavailable for status check, falling back to Postgres', (err as Error).message);
+  }
+
+  try {
+    const client = await getClient();
+    try {
+      const result = await client.query<{ status: string }>(
+        'SELECT status FROM tenants WHERE id = $1 LIMIT 1',
+        [tenantId],
+      );
+      const status = isTenantStatus(result.rows[0]?.status) ? result.rows[0].status : 'ACTIVE';
+      redis.set(cacheKey, status, 'EX', TENANT_STATUS_CACHE_TTL_SECONDS).catch(() => {});
+      return status;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[tenant-context] Postgres unavailable for status check — failing open (ACTIVE)', (err as Error).message);
+    return 'ACTIVE';
+  }
+}
+
+// ─── Platform maintenance mode ─────────────────────────────────────────────────
+//
+// A platform-wide halt (see platform_settings.maintenance_mode, toggled via
+// services/superadmin/src/routes/settings-router.ts) that every service
+// checks the same way tenant status is checked — Redis-cached, Postgres
+// fallback, write-through on toggle. Superadmins (not platform:support or
+// platform:billing — this is for the ops team doing the actual maintenance,
+// not for support/billing staff) bypass it so they can verify things during
+// the halt.
+
+/** Redis key holding the current maintenance-mode flag ('true'/'false'). */
+export const MAINTENANCE_MODE_CACHE_KEY = 'platform:maintenance_mode';
+/** Same rationale as TENANT_STATUS_CACHE_TTL_SECONDS — safety net only. */
+export const MAINTENANCE_MODE_CACHE_TTL_SECONDS = 60;
+
+async function resolveMaintenanceMode(): Promise<boolean> {
+  try {
+    const cached = await redis.get(MAINTENANCE_MODE_CACHE_KEY);
+    if (cached === 'true' || cached === 'false') return cached === 'true';
+  } catch (err) {
+    console.error('[tenant-context] Redis unavailable for maintenance-mode check, falling back to Postgres', (err as Error).message);
+  }
+
+  try {
+    const client = await getClient();
+    try {
+      const result = await client.query<{ maintenance_mode: boolean }>(
+        'SELECT maintenance_mode FROM platform_settings WHERE id = TRUE LIMIT 1',
+      );
+      const on = result.rows[0]?.maintenance_mode ?? false;
+      redis.set(MAINTENANCE_MODE_CACHE_KEY, String(on), 'EX', MAINTENANCE_MODE_CACHE_TTL_SECONDS).catch(() => {});
+      return on;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[tenant-context] Postgres unavailable for maintenance-mode check — failing open (off)', (err as Error).message);
+    return false;
+  }
+}
+
+// ─── Read-only support-impersonation tokens ───────────────────────────────────
+//
+// An X-Support-Token header is an ALTERNATIVE to a Bearer JWT, not an
+// addition to it — see services/superadmin's support-token issuance route.
+// It authenticates a request as a read-only viewer of exactly one tenant,
+// without that tenant's OWNER ever having to share credentials. Deliberately
+// bypasses the SUSPENDED/DELETED gate below (support staff investigating why
+// a tenant is suspended need to be able to look at it), but can never carry
+// more than VIEWER permissions, and every issuance/revocation is logged to
+// platform_audit_logs (see the issuing route) — this file does not log
+// per-request use, only validates the token.
+
+interface SupportTokenRow {
+  tenant_id:       string;
+  issued_by:       string;
+  issued_by_email: string | null;
+  expires_at:      string;
+  revoked_at:      string | null;
+}
+
+async function resolveSupportToken(rawToken: string): Promise<SupportTokenRow | null> {
+  const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+  const client = await getClient();
+  try {
+    const result = await client.query<SupportTokenRow>(
+      `SELECT tenant_id, issued_by, issued_by_email, expires_at, revoked_at
+       FROM platform_support_tokens
+       WHERE token_hash = $1 AND revoked_at IS NULL
+       LIMIT 1`,
+      [tokenHash],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    if (new Date(row.expires_at).getTime() <= Date.now()) return null;
+
+    // Best-effort — a failed timestamp update must never block the request
+    // it's trying to record.
+    client
+      .query('UPDATE platform_support_tokens SET last_used_at = NOW() WHERE token_hash = $1', [tokenHash])
+      .catch(() => {});
+
+    return row;
+  } finally {
+    client.release();
+  }
+}
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
 /**
@@ -91,6 +271,10 @@ function toUserRole(raw: string | undefined): UserRole | null {
  *     different project or audience are rejected.
  *   - tenantId + role come ONLY from `app_metadata` (server-controlled) — the
  *     client cannot spoof tenancy or elevate its role via editable user_metadata.
+ *   - A SUSPENDED or DELETED tenant is rejected here, on every request, even
+ *     though the JWT itself is still validly signed and unexpired — this is
+ *     what makes a superadmin's suspend/delete action take effect
+ *     immediately for every cashier/manager/owner of that tenant, cluster-wide.
  *   - TenantContext is propagated via AsyncLocalStorage so repository functions
  *     never need `res` passed in — tenant isolation is automatic.
  *
@@ -98,10 +282,12 @@ function toUserRole(raw: string | undefined): UserRole | null {
  *   1. Extract Bearer token from Authorization header.
  *   2. Verify signature + iss + aud against Supabase JWKS.
  *   3. Resolve tenantId (required) and role (defaults to VIEWER when absent).
- *   4. Resolve permissions — explicit app_metadata.permissions if present, else
+ *   4. Check the tenant's lifecycle status (Redis-cached, Postgres-backed) —
+ *      423 Locked if SUSPENDED, 404 if DELETED.
+ *   5. Resolve permissions — explicit app_metadata.permissions if present, else
  *      derive from the ROLE_PERMISSIONS matrix.
- *   5. Build TenantContext, set on res.locals AND AsyncLocalStorage.
- *   6. Call next() inside the ALS run callback — all downstream code inherits it.
+ *   6. Build TenantContext, set on res.locals AND AsyncLocalStorage.
+ *   7. Call next() inside the ALS run callback — all downstream code inherits it.
  *
  * NEVER skip this middleware on any route that touches tenant data.
  */
@@ -110,6 +296,41 @@ export async function tenantContextMiddleware(
   res:  Response,
   next: NextFunction,
 ): Promise<void> {
+  // ── Support-token path (alternative to a Bearer JWT entirely) ────────────
+  const supportTokenHeader = req.headers['x-support-token'];
+  if (typeof supportTokenHeader === 'string' && supportTokenHeader.length > 0) {
+    let tokenRow: SupportTokenRow | null;
+    try {
+      tokenRow = await resolveSupportToken(supportTokenHeader);
+    } catch (err) {
+      // Unlike resolveTenantStatus/resolveMaintenanceMode, this is an auth
+      // DECISION, not a secondary policy check layered on top of an already-
+      // verified identity — it must fail CLOSED. A Postgres outage rejecting
+      // support-token requests (while normal JWT auth keeps working, since
+      // that path doesn't need a DB round-trip) is the safe direction to fail.
+      console.error('[tenant-context] Postgres unavailable for support-token check — rejecting', (err as Error).message);
+      sendError(res, Errors.serviceUnavailable('Unable to verify support token right now'));
+      return;
+    }
+    if (!tokenRow) {
+      sendError(res, Errors.unauthorized('Support token is invalid, expired, or revoked'));
+      return;
+    }
+
+    const ctx: TenantContext = {
+      tenantId:        tokenRow.tenant_id,
+      userId:          tokenRow.issued_by,
+      email:           tokenRow.issued_by_email ?? 'support@nerva.internal',
+      role:            'VIEWER',
+      workerTag:       `SUPPORT:${tokenRow.issued_by.slice(0, 8)}`,
+      permissions:     ROLE_PERMISSIONS.VIEWER,
+      viaSupportToken: true,
+    };
+    res.locals['tenant'] = ctx;
+    tenantStore.run(ctx, next);
+    return;
+  }
+
   const authHeader = req.headers['authorization'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     sendError(res, Errors.unauthorized('Missing or malformed Authorization header'));
@@ -136,26 +357,72 @@ export async function tenantContextMiddleware(
   }
 
   // ── Identity extraction ───────────────────────────────────────────────────
-  const meta  = claims.app_metadata ?? {};
-  const uMeta = claims.user_metadata ?? {};
+  // tenantId and role are resolved EXCLUSIVELY from app_metadata. Never fall
+  // back to user_metadata here — it is client-writable, and doing so would
+  // let any authenticated user grant themselves an arbitrary tenant_id/role
+  // via a plain supabase.auth.updateUser() call (cross-tenant privilege
+  // escalation). A user whose app_metadata was never provisioned is expected
+  // to be rejected below, not silently trusted from their own claims.
+  const meta = claims.app_metadata ?? {};
 
   const userId   = claims.sub;
   const email    = claims.email;
-  const tenantId = meta.tenant_id ?? uMeta.tenant_id;
+  let   tenantId = meta.tenant_id;
 
   if (!userId || !email) {
     sendError(res, Errors.unauthorized('Token is missing required claims (sub/email)'));
     return;
   }
 
-  // tenantId is mandatory — a token without one cannot be scoped to any data.
+  const isSuperadminToken =
+    Array.isArray(meta.permissions) && (meta.permissions as string[]).includes('superadmin:access');
+
+  // ── Platform maintenance mode ─────────────────────────────────────────────
+  // Checked before any tenant-specific work — a platform-wide halt affects
+  // every tenant identically, so there's nothing tenant-scoped to look up
+  // yet. Superadmins bypass it so ops can verify things during the halt.
+  if (!isSuperadminToken && await resolveMaintenanceMode()) {
+    sendError(res, Errors.serviceUnavailable(
+      'The platform is temporarily down for maintenance. Please try again shortly.',
+    ));
+    return;
+  }
+
+  // tenantId is mandatory for a normal tenant user — a token without one
+  // cannot be scoped to any data. A superadmin token is the one deliberate
+  // exception: it isn't scoped to any tenant by design, so it gets the
+  // sentinel instead of being rejected here.
   if (!tenantId) {
-    sendError(res, Errors.forbidden('Token has no tenant assignment (app_metadata.tenant_id)'));
+    if (isSuperadminToken) {
+      tenantId = PLATFORM_SENTINEL_TENANT_ID;
+    } else {
+      sendError(res, Errors.forbidden('Token has no tenant assignment (app_metadata.tenant_id)'));
+      return;
+    }
+  }
+
+  // ── Tenant lifecycle gate ─────────────────────────────────────────────────
+  // A superadmin-suspended/deleted tenant must be rejected here, even with a
+  // perfectly valid, unexpired JWT — this is the ONLY point every request
+  // across every service passes through, so it's the only place this can be
+  // enforced universally without relying on every route remembering to add
+  // an extra middleware.
+  const tenantStatus = await resolveTenantStatus(tenantId);
+  if (tenantStatus === 'SUSPENDED') {
+    sendError(res, Errors.locked(
+      'This account has been suspended. Contact support to resolve this.',
+    ));
+    return;
+  }
+  if (tenantStatus === 'DELETED') {
+    // Treat exactly like a tenant that never existed — don't confirm to a
+    // caller with a stale token that this tenant id ever was real.
+    sendError(res, Errors.notFound('Tenant not found'));
     return;
   }
 
   // Role from app_metadata; default to read-only VIEWER when unset.
-  const role = toUserRole(meta.role ?? uMeta.role) ?? 'VIEWER';
+  const role = toUserRole(meta.role) ?? 'VIEWER';
 
   // ── Permission resolution ─────────────────────────────────────────────────
   // Prefer explicit permissions provisioned in app_metadata; otherwise derive

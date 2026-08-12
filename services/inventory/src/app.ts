@@ -7,6 +7,10 @@ import { batchesRouter }   from './routes/batches-router';
 
 const app = express();
 
+// Trust exactly one proxy hop (the nginx gateway) so req.ip reflects the real
+// client instead of always resolving to the gateway container's address.
+app.set('trust proxy', 1);
+
 app.use(corsMiddleware);
 app.use(helmet());
 app.use(express.json({ limit: '512kb' }));
@@ -19,6 +23,6 @@ app.get('/health', (_req, res) => {
 // All inventory routes require a valid tenant context
 app.use('/api/v1/inventory', tenantContextMiddleware, inventoryRouter, batchesRouter);
 
-app.use(globalErrorHandler);
+app.use(globalErrorHandler('inventory'));
 
 export { app };

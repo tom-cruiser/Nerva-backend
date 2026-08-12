@@ -24,6 +24,8 @@ You are an automated, high-performance Software Architect and Security Engineer.
   - `sales-sync` (Port 3003): Batch ingestion processing (Max 500 txn).
   - `ledger-payments` (Port 3004): Customer credit, FIFO payment, MoMo (MTN, Airtel, Vodafone, Tigo).
   - `whatsapp-engine` (Port 3005): Twilio bridge, 8 PM automated reports.
+  - `shifts` (Port 3006): Cash drawer open/close, reconciliation.
+  - `superadmin` (Port 3007): Platform-level tenant lifecycle (suspend/unblock/soft-delete/purge, tier changes), cross-tenant health metrics. Every route behind `requireSuperadmin()` — see `services/superadmin/scripts/grant-superadmin.ts` for how the `superadmin:access` permission is granted (deliberately not via any API endpoint).
 
 ---
 

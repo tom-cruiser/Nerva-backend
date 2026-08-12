@@ -2,7 +2,7 @@
 // You can use libraries like pdf-lib, puppeteer, or pdfkit
 
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
-import fs from 'fs/promises';
+import type { POSReportData } from './report-service';
 
 export async function createPOSReportPDF(
   tenantId: string,

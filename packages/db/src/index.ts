@@ -1,1 +1,1 @@
-export { query, getClient, closePool } from './pool';
+export { query, getClient, closePool, getPoolStats } from './pool';

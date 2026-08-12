@@ -17,7 +17,7 @@ const FEATURE_MAP: Record<string, string[]> = {
 
 /**
  * Tier gating middleware.
- * Looks up the organization's subscription_tier and rejects requests for features
+ * Looks up the tenant's billing_tier and rejects requests for features
  * that are not included in their tier.
  */
 export function tierGate(feature: string) {
@@ -32,11 +32,16 @@ export function tierGate(feature: string) {
 
     const client = await getClient();
     try {
-      const q = await client.query<{ subscription_tier: string }>(
-        `SELECT subscription_tier FROM organizations WHERE id = $1 LIMIT 1`,
+      // NOTE: there is no `organizations` table in the schema — tenants and
+      // their billing tier live on `tenants.billing_tier` (see
+      // packages/db/src/migrations/001_initial_schema.sql). The previous
+      // query against a nonexistent `organizations` table made every
+      // tier-gated route 500 unconditionally.
+      const q = await client.query<{ billing_tier: string }>(
+        `SELECT billing_tier FROM tenants WHERE id = $1 AND is_active = TRUE LIMIT 1`,
         [ctx.tenantId],
       );
-      const tier = q.rows[0]?.subscription_tier ?? 'starter';
+      const tier = q.rows[0]?.billing_tier ?? 'starter';
       const allowed = FEATURE_MAP[tier] ?? [];
       if (!allowed.includes(feature)) {
         sendError(res, Errors.forbidden(`Feature "${feature}" is not available in tier: ${tier}`));

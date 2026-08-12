@@ -18,6 +18,10 @@ import { closePool } from '@retail/db';
 
 const app = express();
 
+// Trust exactly one proxy hop (the nginx gateway) so req.ip reflects the real
+// client instead of always resolving to the gateway container's address.
+app.set('trust proxy', 1);
+
 // ============================================
 // Middleware
 // ============================================
@@ -111,41 +115,15 @@ app.get('/health', async (_req, res) => {
 });
 
 // ============================================
-// Public Status (Limited - NO AUTH REQUIRED)
+// NOTE: A duplicate, unauthenticated `/api/v1/whatsapp/public-status` handler
+// used to be registered directly on `app` here, ahead of `whatsappRouter`.
+// Because Express matches routes in registration order, that duplicate always
+// won and leaked per-tenant status (tenantId, messageCount, lastActivity) for
+// up to 10 tenants to any anonymous caller, while the authenticated
+// `/public-status` route inside whatsappRouter (behind tenantContextMiddleware)
+// was permanently unreachable dead code. It has been removed; the router's
+// authenticated version (mounted below) is now the sole implementation.
 // ============================================
-
-app.get('/api/v1/whatsapp/public-status', async (_req, res) => {
-  try {
-    const stats = getSessionStats();
-    const sessions = listSessions().slice(0, 10); // Limit for privacy
-    
-    res.json({
-      success: true,
-      status: stats.total > 0 ? 'active' : 'idle',
-      stats: {
-        total: stats.total,
-        ready: stats.ready,
-        authenticating: stats.authenticating,
-        failed: stats.failed,
-        disconnected: stats.disconnected
-      },
-      recentSessions: sessions.map(s => ({
-        tenantId: s.tenantId.slice(0, 8) + '...', // Mask for privacy
-        status: s.status,
-        messageCount: s.messageCount,
-        lastActivity: s.lastActivity?.toISOString()
-      })),
-      timestamp: new Date().toISOString()
-    });
-  } catch (err: any) {
-    console.error('[whatsapp-engine] Public status error:', err);
-    res.status(500).json({
-      success: false,
-      error: err.message || 'Failed to get status',
-      timestamp: new Date().toISOString()
-    });
-  }
-});
 
 // ============================================
 // Test Endpoints (Development Only)
@@ -254,7 +232,7 @@ app.use((_req, res) => {
 });
 
 // Global error handler
-app.use(globalErrorHandler);
+app.use(globalErrorHandler('whatsapp-engine'));
 
 // ============================================
 // Graceful Shutdown

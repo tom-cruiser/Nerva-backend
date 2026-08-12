@@ -10,7 +10,7 @@ import {
   getSessionStats,
   checkSessionHealth,
 } from '../lib/whatsapp-client';
-import { getTenantContext, Errors, ApiError } from '@retail/middleware';
+import { getTenantContext, Errors, ApiError, requireSuperadmin } from '@retail/middleware';
 
 const whatsappRouter = Router();
 
@@ -232,8 +232,7 @@ whatsappRouter.post('/logout', async (req, res, next) => {
 // ============================================
 
 // GET /admin/sessions - List all active sessions (Admin only)
-whatsappRouter.get('/admin/sessions', async (req, res, next) => {
-  // This should have admin middleware in production
+whatsappRouter.get('/admin/sessions', requireSuperadmin(), async (req, res, next) => {
   try {
     const sessions = listSessions();
     const stats = getSessionStats();
@@ -258,9 +257,8 @@ whatsappRouter.get('/admin/sessions', async (req, res, next) => {
 });
 
 // POST /admin/cleanup - Manually trigger session cleanup (Admin only)
-whatsappRouter.post('/admin/cleanup', async (req, res, next) => {
+whatsappRouter.post('/admin/cleanup', requireSuperadmin(), async (req, res, next) => {
   try {
-    // This should have admin middleware in production
     const { cleanupDeadSessions } = await import('../lib/whatsapp-client');
     await cleanupDeadSessions();
     
@@ -276,9 +274,8 @@ whatsappRouter.post('/admin/cleanup', async (req, res, next) => {
 });
 
 // POST /admin/shutdown - Shutdown all sessions (Admin only)
-whatsappRouter.post('/admin/shutdown', async (req, res, next) => {
+whatsappRouter.post('/admin/shutdown', requireSuperadmin(), async (req, res, next) => {
   try {
-    // This should have admin middleware in production
     const { shutdownAllSessions } = await import('../lib/whatsapp-client');
     await shutdownAllSessions();
     

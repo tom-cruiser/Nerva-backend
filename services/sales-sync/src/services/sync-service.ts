@@ -1,4 +1,5 @@
-import { getClient }    from '@retail/db';
+import { getClient }        from '@retail/db';
+import { checkResourceLimit } from '@retail/middleware';
 import { PoolClient }   from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -29,6 +30,93 @@ function clientIsNewer(clientTs: string, serverTs: Date | string | null): boolea
   const client = new Date(clientTs).getTime();
   const server = new Date(serverTs).getTime();
   return client > server;
+}
+
+// ─── Clock-skew protection ─────────────────────────────────────────────────────
+//
+// LWW trusts the client-supplied `updated_at` as the logical clock for every
+// collection above. A device with a wrong system clock (drifted, or a clock
+// deliberately set far in the future/past) can otherwise permanently win — or
+// permanently lose — every LWW comparison against that record, regardless of
+// which side actually happened later in real time. Reject the record instead
+// of ever letting a wildly-skewed timestamp reach a `clientIsNewer` check.
+
+/** Client timestamps more than 2 hours ahead of the server clock are rejected. */
+const MAX_FUTURE_DRIFT_MS = 2 * 60 * 60 * 1000;
+/** Client timestamps more than 30 days behind the server clock are rejected. */
+const MAX_PAST_DRIFT_MS = 30 * 24 * 60 * 60 * 1000;
+
+interface ClockDriftCheck {
+  withinBounds: boolean;
+  /** Positive = client is ahead of the server; negative = client is behind. */
+  driftMs: number;
+}
+
+/**
+ * Compares a client-supplied ISO timestamp against the server's own clock.
+ * Does NOT compare against any other record's timestamp — this catches a
+ * broken device clock even on that device's very first sync.
+ */
+function checkClockDrift(clientTs: string, now: number = Date.now()): ClockDriftCheck {
+  const clientMs = new Date(clientTs).getTime();
+  const driftMs = clientMs - now;
+
+  if (Number.isNaN(clientMs)) {
+    // Already rejected by zod's z.string().datetime() before reaching here in
+    // practice, but treat an unparseable timestamp as maximally suspect.
+    return { withinBounds: false, driftMs: Number.POSITIVE_INFINITY };
+  }
+
+  if (driftMs > MAX_FUTURE_DRIFT_MS || driftMs < -MAX_PAST_DRIFT_MS) {
+    return { withinBounds: false, driftMs };
+  }
+  return { withinBounds: true, driftMs };
+}
+
+/**
+ * Persists a per-device clock-drift flag (so the next pull can tell the
+ * client "your clock looks wrong") and writes a durable audit trail entry.
+ * Runs inside the same transaction as the batch it was detected in.
+ */
+async function flagDeviceClockDrift(
+  client:   PoolClient,
+  tenantId: string,
+  deviceId: string,
+  syncToken: string,
+  worstDriftMs: number,
+  affectedChangeCount: number,
+  workerTag: string,
+): Promise<void> {
+  const cursorRow = await client.query<{ id: string }>(
+    `INSERT INTO sync_cursors (tenant_id, device_id, sync_token, clock_drift_flagged_at, clock_drift_count)
+     VALUES ($1, $2, $3, NOW(), 1)
+     ON CONFLICT (tenant_id, device_id) DO UPDATE
+       SET clock_drift_flagged_at = NOW(),
+           clock_drift_count      = sync_cursors.clock_drift_count + 1
+     RETURNING id`,
+    [tenantId, deviceId, syncToken],
+  );
+
+  const driftDirection = worstDriftMs > 0 ? 'ahead of' : 'behind';
+  const driftHuman = `${Math.round(Math.abs(worstDriftMs) / 1000)}s`;
+
+  // Immediate operational visibility (log aggregation / alerting), in
+  // addition to the durable audit_logs row below.
+  console.error(
+    `[sync-service] Clock drift detected for tenant=${tenantId} device=${deviceId}: ` +
+    `${affectedChangeCount} change(s) rejected, worst drift ${driftHuman} ${driftDirection} server clock.`,
+  );
+
+  await writeAuditLog(
+    client, tenantId, 'sync_device', cursorRow.rows[0].id, 'CLOCK_DRIFT', workerTag,
+    null,
+    {
+      device_id: deviceId,
+      worst_drift_ms: worstDriftMs,
+      affected_change_count: affectedChangeCount,
+      detected_at: new Date().toISOString(),
+    },
+  );
 }
 
 // ─── Per-collection processors ────────────────────────────────────────────────
@@ -122,6 +210,21 @@ async function processSale(
       accepted.push({
         id: change.id, server_id: existing.rows[0].id,
         action: SyncAction.CREATE, collection: SyncCollection.SALES,
+      });
+      return;
+    }
+
+    // ── Plan resource-limit gate ──────────────────────────────────────────
+    // Runs BEFORE stock reservation so a sale rejected for being over the
+    // plan's monthly transaction limit never reserves stock it will never
+    // consume.
+    const limitCheck = await checkResourceLimit(tenantId, 'max_monthly_transactions');
+    if (!limitCheck.allowed) {
+      rejected.push({
+        id: change.id,
+        reason: `Monthly transaction limit reached (${limitCheck.current}/${limitCheck.limit} this month). `
+          + 'Upgrade the subscription plan to record more sales this month.',
+        collection: SyncCollection.SALES, action: SyncAction.CREATE,
       });
       return;
     }
@@ -260,9 +363,11 @@ async function processInventory(
     return;
   }
 
-  if (change.action === SyncAction.CREATE || existing.rows.length === 0) {
-    // CREATE or first-time push of an item that doesn't exist yet
-    const serverId = existing.rows[0]?.id ?? uuidv4();
+  if (existing.rows.length === 0) {
+    // Genuinely new row — CREATE or first-time push of an item that doesn't
+    // exist yet. Nothing to compare against, so the unconditional INSERT is
+    // correct here.
+    const serverId = uuidv4();
     await client.query(
       `INSERT INTO inventories
          (id, tenant_id, product_sku, barcode, name, description,
@@ -292,6 +397,61 @@ async function processInventory(
     await writeAuditLog(client, tenantId, 'inventory', serverId, 'CREATE', workerTag, null, d);
     accepted.push({
       id: change.id, server_id: serverId,
+      action: change.action, collection: SyncCollection.INVENTORIES,
+    });
+    return;
+  }
+
+  if (change.action === SyncAction.CREATE) {
+    // A row already exists for this tenant+SKU (e.g. a device replaying a
+    // stale local CREATE, or two devices creating the same SKU under
+    // different clocks). Apply the same LWW check the UPDATE branch below
+    // uses before allowing this CREATE to overwrite the existing row —
+    // otherwise the ON CONFLICT DO UPDATE would blindly clobber newer
+    // server data regardless of which side is actually newer.
+    const row = existing.rows[0];
+    const serverLogical = row.client_updated_at ?? row.updated_at;
+    if (!clientIsNewer(change.updated_at, serverLogical)) {
+      conflicts.push({
+        id:          change.id,
+        collection:  SyncCollection.INVENTORIES,
+        client_data: change.data,
+        server_data: { ...row },
+        resolution:  'SERVER_WINS',
+        message:     'Server record is newer. Client change discarded (LWW).',
+      });
+      return;
+    }
+
+    await client.query(
+      `INSERT INTO inventories
+         (id, tenant_id, product_sku, barcode, name, description,
+          unit_price, stock_quantity, reorder_level, category,
+          client_updated_at, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+       ON CONFLICT (tenant_id, product_sku) DO UPDATE
+         SET name              = EXCLUDED.name,
+             barcode           = EXCLUDED.barcode,
+             description       = EXCLUDED.description,
+             unit_price        = EXCLUDED.unit_price,
+             stock_quantity    = EXCLUDED.stock_quantity,
+             reorder_level     = EXCLUDED.reorder_level,
+             category          = EXCLUDED.category,
+             client_updated_at = EXCLUDED.client_updated_at,
+             updated_by        = EXCLUDED.updated_by,
+             version           = inventories.version + 1,
+             updated_at        = NOW()`,
+      [
+        row.id, tenantId, d.product_sku, d.barcode ?? null,
+        d.name, d.description ?? null,
+        d.unit_price, d.stock_quantity, d.reorder_level,
+        d.category ?? null, change.updated_at,
+        userId,
+      ],
+    );
+    await writeAuditLog(client, tenantId, 'inventory', row.id, 'CREATE', workerTag, row, d);
+    accepted.push({
+      id: change.id, server_id: row.id,
       action: change.action, collection: SyncCollection.INVENTORIES,
     });
     return;
@@ -519,7 +679,7 @@ async function processLedgerEntry(
 
 type AuditAction =
   | 'CREATE' | 'UPDATE' | 'SOFT_DELETE' | 'VOID'
-  | 'CREDIT' | 'PAYMENT';
+  | 'CREDIT' | 'PAYMENT' | 'CLOCK_DRIFT';
 
 async function writeAuditLog(
   client:     PoolClient,
@@ -574,10 +734,17 @@ async function updateSyncCursor(
  */
 export async function processSync(job: SyncJobPayload): Promise<SyncResponse> {
   const startTime = Date.now();
+  const serverNow = Date.now();
 
   const accepted:  AcceptedChange[]  = [];
   const rejected:  RejectedChange[]  = [];
   const conflicts: ConflictRecord[]  = [];
+
+  // Worst (largest-magnitude) drift observed across the batch, and how many
+  // changes were rejected for it — used to flag the device once, not once
+  // per offending change.
+  let worstDriftMs = 0;
+  let clockDriftRejectionCount = 0;
 
   const syncToken = `${job.tenantId}:${job.deviceId}:${Date.now()}`;
 
@@ -587,6 +754,31 @@ export async function processSync(job: SyncJobPayload): Promise<SyncResponse> {
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
 
     for (const change of job.changes) {
+      // ── Clock-skew gate ─────────────────────────────────────────────────
+      // Every collection below trusts `change.updated_at` as the LWW logical
+      // clock. Validate it against the SERVER's clock before it ever reaches
+      // a clientIsNewer() comparison — a device with a badly wrong clock
+      // must never silently win (or lose) a conflict, it must be rejected
+      // and flagged so the client can be told to fix its system time.
+      const drift = checkClockDrift(change.updated_at, serverNow);
+      if (!drift.withinBounds) {
+        rejected.push({
+          id:          change.id,
+          reason:      `Rejected: client timestamp (${change.updated_at}) drifts ` +
+                       `${Math.round(drift.driftMs / 1000)}s from the server clock, ` +
+                       `outside the allowed window (+${MAX_FUTURE_DRIFT_MS / 1000}s / ` +
+                       `-${MAX_PAST_DRIFT_MS / 1000}s). Check this device's system clock.`,
+          collection:  change.collection,
+          action:      change.action,
+          clock_drift: true,
+        });
+        clockDriftRejectionCount += 1;
+        if (Math.abs(drift.driftMs) > Math.abs(worstDriftMs)) {
+          worstDriftMs = drift.driftMs;
+        }
+        continue; // Do NOT apply or overwrite anything for this change.
+      }
+
       switch (change.collection) {
         case SyncCollection.SALES:
           await processSale(
@@ -628,6 +820,13 @@ export async function processSync(job: SyncJobPayload): Promise<SyncResponse> {
 
     await updateSyncCursor(client, job.tenantId, job.deviceId, syncToken);
 
+    if (clockDriftRejectionCount > 0) {
+      await flagDeviceClockDrift(
+        client, job.tenantId, job.deviceId, syncToken,
+        worstDriftMs, clockDriftRejectionCount, job.workerTag,
+      );
+    }
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -637,16 +836,19 @@ export async function processSync(job: SyncJobPayload): Promise<SyncResponse> {
   }
 
   return {
-    sync_token:       syncToken,
-    accepted_changes: accepted,
-    rejected_changes: rejected,
+    sync_token:           syncToken,
+    clock_drift_detected: clockDriftRejectionCount > 0,
+    server_time:          new Date(serverNow).toISOString(),
+    accepted_changes:     accepted,
+    rejected_changes:     rejected,
     conflicts,
     stats: {
-      total_received:     job.changes.length,
-      accepted:           accepted.length,
-      rejected:           rejected.length,
-      conflicts:          conflicts.length,
-      processing_time_ms: Date.now() - startTime,
+      total_received:         job.changes.length,
+      accepted:               accepted.length,
+      rejected:               rejected.length,
+      conflicts:              conflicts.length,
+      clock_drift_rejections: clockDriftRejectionCount,
+      processing_time_ms:     Date.now() - startTime,
     },
     timestamp: new Date().toISOString(),
   };

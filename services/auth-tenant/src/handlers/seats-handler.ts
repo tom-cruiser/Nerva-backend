@@ -1,16 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
-import { Errors, getTenantContext }        from '@retail/middleware';
-import { query }                           from '@retail/db';
+import { Errors, getTenantContext, checkResourceLimit } from '@retail/middleware';
+import { query, getClient }                 from '@retail/db';
 import type { UserRole }                   from '@retail/types';
 import { provisionUser }                   from '../lib/user-provisioning';
-
-// Seat limit per billing tier — mirrors TIER_SEAT_LIMITS in the frontend.
-const TIER_LIMITS: Record<string, number> = {
-  starter:          2,
-  premium:          5,
-  business:         15,
-  business_premium: Infinity,
-};
 
 interface TenantTierRow {
   billing_tier: string;
@@ -32,6 +24,10 @@ interface SeatRow {
  *
  * Returns all provisioned users for the authenticated tenant plus tier metadata.
  * Requires: users:read permission (OWNER or MANAGER).
+ *
+ * Seat ceiling now comes from `subscription_plans.max_cashiers` (via
+ * `checkResourceLimit`) instead of a hardcoded tier map, so a superadmin plan
+ * edit (PATCH /api/v1/superadmin/plans/:code) takes effect here immediately.
  */
 export async function listSeatsHandler(
   _req: Request,
@@ -41,7 +37,7 @@ export async function listSeatsHandler(
   try {
     const ctx = getTenantContext(res);
 
-    const [seatsResult, tierResult] = await Promise.all([
+    const [seatsResult, tierResult, limitCheck] = await Promise.all([
       query<SeatRow>(
         `SELECT id, email, full_name, role, worker_tag, is_active,
                 created_at, updated_at
@@ -55,15 +51,15 @@ export async function listSeatsHandler(
         `SELECT billing_tier FROM tenants WHERE id = $1 LIMIT 1`,
         [ctx.tenantId],
       ),
+      checkResourceLimit(ctx.tenantId, 'max_cashiers'),
     ]);
 
-    const tier      = tierResult.rows[0]?.billing_tier ?? 'starter';
-    const max_seats = TIER_LIMITS[tier] ?? 2;
+    const tier = tierResult.rows[0]?.billing_tier ?? 'starter';
 
     res.status(200).json({
       seats:      seatsResult.rows,
       tier,
-      max_seats:  Number.isFinite(max_seats) ? max_seats : null,
+      max_seats:  limitCheck.limit, // null = unlimited (business_premium)
       used_seats: seatsResult.rows.length,
     });
   } catch (err) {
@@ -87,7 +83,8 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
  * POST /api/v1/auth/seats
  *
  * Provisions a new team-member seat scoped to the authenticated tenant.
- * Only OWNER can create seats. Enforces the billing-tier seat limit.
+ * Only OWNER can create seats. Enforces the billing-plan seat limit
+ * (`subscription_plans.max_cashiers`, via `checkResourceLimit`).
  */
 export async function createSeatHandler(
   req:  Request,
@@ -117,30 +114,55 @@ export async function createSeatHandler(
       return next(Errors.invalidRequest('worker_tag is required'));
     }
 
-    // ── Tier-limit enforcement ───────────────────────────────────────────────
-    const [countResult, tierResult] = await Promise.all([
-      query<{ count: string }>(
-        `SELECT COUNT(*) AS count FROM users
-         WHERE tenant_id = $1 AND deleted_at IS NULL`,
-        [ctx.tenantId],
-      ),
-      query<TenantTierRow>(
-        `SELECT billing_tier FROM tenants WHERE id = $1 LIMIT 1`,
-        [ctx.tenantId],
-      ),
-    ]);
+    // ── Tier-limit enforcement, race-guarded ─────────────────────────────────
+    // The tenant row is locked (SELECT ... FOR UPDATE) for the duration of the
+    // count-and-decide step below, so two concurrent seat-creation requests
+    // for the same tenant queue on that lock instead of both reading the same
+    // stale seat count and both passing the check before either commits
+    // (the TOCTOU race the old hardcoded-map version had).
+    //
+    // provisionUser() talks to the Supabase Admin API, not Postgres — it
+    // cannot run inside this DB transaction, so the lock is released at
+    // COMMIT, immediately before provisionUser is called below. That leaves a
+    // narrow residual window between this COMMIT and provisionUser's own
+    // users-table mirror INSERT completing, during which a second request
+    // could still slip through. Closing that fully would mean holding a
+    // Postgres row lock for the duration of an external HTTP round-trip,
+    // which is a worse trade-off (lock contention / timeout risk) than the
+    // narrow race it would remove — this is the minimal-correct fix, not a
+    // perfect one.
+    const lockClient = await getClient();
+    let tier: string;
+    try {
+      await lockClient.query('BEGIN');
 
-    const tier      = tierResult.rows[0]?.billing_tier ?? 'starter';
-    const max_seats = TIER_LIMITS[tier] ?? 2;
-    const used      = parseInt(countResult.rows[0]?.count ?? '0', 10);
-
-    if (Number.isFinite(max_seats) && used >= max_seats) {
-      return next(
-        Errors.forbidden(
-          `Seat limit reached for ${tier} tier (${max_seats} seats). Upgrade to add more users.`,
-          { tier, max_seats, used_seats: used },
-        ),
+      const tenantRow = await lockClient.query<{ id: string; billing_tier: string }>(
+        'SELECT id, billing_tier FROM tenants WHERE id = $1 FOR UPDATE',
+        [ctx.tenantId],
       );
+      if (tenantRow.rows.length === 0) {
+        await lockClient.query('ROLLBACK');
+        return next(Errors.notFound('Tenant not found'));
+      }
+      tier = tenantRow.rows[0].billing_tier;
+
+      const limitCheck = await checkResourceLimit(ctx.tenantId, 'max_cashiers');
+      if (!limitCheck.allowed) {
+        await lockClient.query('ROLLBACK');
+        return next(
+          Errors.forbidden(
+            `Seat limit reached for ${tier} tier (${limitCheck.limit} seats). Upgrade to add more users.`,
+            { tier, max_seats: limitCheck.limit, used_seats: limitCheck.current },
+          ),
+        );
+      }
+
+      await lockClient.query('COMMIT');
+    } catch (err) {
+      await lockClient.query('ROLLBACK');
+      throw err;
+    } finally {
+      lockClient.release();
     }
 
     // ── Provision ────────────────────────────────────────────────────────────

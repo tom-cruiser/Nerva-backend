@@ -1,2 +1,3 @@
-2026/08/10-20:33:23.593 520e Creating DB /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-9cf64a74-6226-4a4c-a6ab-e81fbd86533f/Default/Site Characteristics Database since it was missing.
-2026/08/10-20:33:23.612 520e Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-9cf64a74-6226-4a4c-a6ab-e81fbd86533f/Default/Site Characteristics Database/MANIFEST-000001
+2026/08/12-12:35:53.821 1cf63 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-9cf64a74-6226-4a4c-a6ab-e81fbd86533f/Default/Site Characteristics Database/MANIFEST-000001
+2026/08/12-12:35:53.821 1cf63 Recovering log #3
+2026/08/12-12:35:53.822 1cf63 Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-9cf64a74-6226-4a4c-a6ab-e81fbd86533f/Default/Site Characteristics Database/000003.log 

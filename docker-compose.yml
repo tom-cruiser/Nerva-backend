@@ -137,6 +137,23 @@ services:
       - nerva-network
     restart: unless-stopped
 
+  superadmin:
+    build:
+      context: .
+      dockerfile: services/superadmin/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3007
+      NODE_ENV: development
+    ports:
+      - "3007:3007"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
+
   # ── API Gateway (nginx) — single entry point for all backend services ────────
   gateway:
     image: nginx:1.25-alpine
@@ -151,6 +168,7 @@ services:
       - ledger-payments
       - whatsapp-engine
       - shifts
+      - superadmin
     networks:
       - nerva-network
     restart: unless-stopped

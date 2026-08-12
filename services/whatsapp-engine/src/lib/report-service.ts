@@ -1,6 +1,6 @@
 // services/whatsapp-engine/src/lib/report-service.ts
 import { sendMessageFrom } from './whatsapp-client';
-import { createPDF } from './pdf-generator';
+import { createPOSReportPDF } from './pdf-generator';
 import { formatReportMessage } from './report-formatter';
 import fs from 'fs/promises';
 import path from 'path';
@@ -172,44 +172,20 @@ async function generatePDFReport(
   date: string,
   period: string,
   summary: POSReportData['summary'],
-  options: { includeCharts?: boolean; includeBreakdown?: boolean }
+  _options: { includeCharts?: boolean; includeBreakdown?: boolean }
 ): Promise<{ path: string; size: number }> {
-  // This function would use a PDF library like pdf-lib or puppeteer
-  // For now, we'll create a placeholder
   const pdfDir = path.join(process.cwd(), 'reports');
   await fs.mkdir(pdfDir, { recursive: true });
-  
+
   const pdfPath = path.join(pdfDir, `report_${tenantId}_${date}_${period}.pdf`);
-  
-  // Placeholder - replace with actual PDF generation
-  const pdfContent = `Report for ${date}
-Period: ${period}
-Tenant: ${tenantId}
 
-=== SUMMARY ===
-Total Sales: $${summary.totalSales.toFixed(2)}
-Total Orders: ${summary.totalOrders}
-Average Order Value: $${summary.averageOrderValue.toFixed(2)}
+  // Generate actual PDF bytes (real application/pdf content, not a text
+  // file mislabeled with a .pdf extension).
+  const pdfBuffer = await createPOSReportPDF(tenantId, date, period, summary);
 
-=== TOP SELLING PRODUCTS ===
-${summary.topSellingProducts.map(p => 
-  `- ${p.name}: ${p.quantity} units ($${p.revenue.toFixed(2)})`
-).join('\n')}
-
-=== REVENUE BY CATEGORY ===
-${summary.revenueByCategory.map(c => 
-  `- ${c.category}: $${c.revenue.toFixed(2)}`
-).join('\n')}
-
-=== PAYMENT METHODS ===
-${summary.paymentMethods.map(p => 
-  `- ${p.method}: $${p.amount.toFixed(2)} (${p.count} transactions)`
-).join('\n')}
-`;
-
-  await fs.writeFile(pdfPath, pdfContent);
+  await fs.writeFile(pdfPath, pdfBuffer);
   const stats = await fs.stat(pdfPath);
-  
+
   return { path: pdfPath, size: stats.size };
 }
 

@@ -8,6 +8,10 @@ console.log('[app] 🚀 Starting ledger-payments service...');
 
 const app = express();
 
+// Trust exactly one proxy hop (the nginx gateway) so req.ip reflects the real
+// client instead of always resolving to the gateway container's address.
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(corsMiddleware);
 app.use(helmet());
@@ -82,7 +86,7 @@ app.use('/api/v1/ledger', tenantContextMiddleware, ledgerRouter);
 console.log('[app] ✅ Ledger router mounted');
 
 // Global error handler
-app.use(globalErrorHandler);
+app.use(globalErrorHandler('ledger-payments'));
 
 console.log('[app] ✅ App configured successfully');
 

@@ -6,6 +6,10 @@ import { shiftsRouter } from './routes/shifts-router';
 
 const app = express();
 
+// Trust exactly one proxy hop (the nginx gateway) so req.ip reflects the real
+// client instead of always resolving to the gateway container's address.
+app.set('trust proxy', 1);
+
 app.use(corsMiddleware);
 app.use(helmet());
 app.use(express.json({ limit: '256kb' }));
@@ -18,6 +22,6 @@ app.get('/health', (_req, res) => {
 // All shifts routes require a valid tenant context.
 app.use('/api/v1/shifts', tenantContextMiddleware, shiftsRouter);
 
-app.use(globalErrorHandler);
+app.use(globalErrorHandler('shifts'));
 
 export { app };

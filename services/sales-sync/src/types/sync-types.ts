@@ -108,10 +108,14 @@ export interface AcceptedChange {
 }
 
 export interface RejectedChange {
-  id:         string;
-  reason:     string;
-  collection: SyncCollection;
-  action:     SyncAction;
+  id:          string;
+  reason:      string;
+  collection:  SyncCollection;
+  action:      SyncAction;
+  /** Set when this change was rejected specifically for clock-skew, as
+   *  opposed to validation/business-rule failures — lets the client tell
+   *  "your data was wrong" apart from "your device clock is wrong". */
+  clock_drift?: boolean;
 }
 
 export interface ConflictRecord {
@@ -124,11 +128,13 @@ export interface ConflictRecord {
 }
 
 export interface SyncStats {
-  total_received:     number;
-  accepted:           number;
-  rejected:           number;
-  conflicts:          number;
-  processing_time_ms: number;
+  total_received:         number;
+  accepted:               number;
+  rejected:               number;
+  conflicts:              number;
+  /** Subset of `rejected` that failed specifically for clock skew. */
+  clock_drift_rejections: number;
+  processing_time_ms:     number;
 }
 
 export interface SyncResponse {
@@ -138,6 +144,15 @@ export interface SyncResponse {
   conflicts:        ConflictRecord[];
   stats:            SyncStats;
   timestamp:        string;  // ISO-8601
+  /** True when one or more changes in this batch were rejected for clock
+   *  skew (see checkClockDrift in sync-service.ts). The client should
+   *  compare `server_time` against its own clock and prompt the user /
+   *  device owner to fix the device's system time — retrying the same
+   *  batch will keep failing until the clock is corrected. */
+  clock_drift_detected: boolean;
+  /** Server's own clock at response time (ISO-8601), for the client to
+   *  diff against its local clock when clock_drift_detected is true. */
+  server_time: string;
 }
 
 /** Shape stored in BullMQ queue */

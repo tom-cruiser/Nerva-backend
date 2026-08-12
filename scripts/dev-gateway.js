@@ -13,6 +13,7 @@ const ROUTES = [
     { prefix: '/api/v1/ledger/',    port: 3004 },
     { prefix: '/api/v1/whatsapp/',  port: 3005 },
     { prefix: '/api/v1/shifts/',    port: 3006 },
+    { prefix: '/api/v1/superadmin/', port: 3007 },
 ].sort((a, b) => b.prefix.length - a.prefix.length);
 
 function applyCors(req, res) {

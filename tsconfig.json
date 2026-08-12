@@ -10,6 +10,8 @@
     { "path": "services/inventory" },
     { "path": "services/sales-sync" },
     { "path": "services/ledger-payments" },
-    { "path": "services/whatsapp-engine" }
+    { "path": "services/whatsapp-engine" },
+    { "path": "services/shifts" },
+    { "path": "services/superadmin" }
   ]
 }

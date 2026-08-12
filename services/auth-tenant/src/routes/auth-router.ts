@@ -1,5 +1,5 @@
 import { Router }       from 'express';
-import { rateLimit, tenantContextMiddleware, requirePermission } from '@retail/middleware';
+import { rateLimit, tenantContextMiddleware, requirePermission, idempotency } from '@retail/middleware';
 import { redis }        from '@retail/redis';
 import { loginHandler }      from '../handlers/login-handler';
 import { refreshHandler }    from '../handlers/refresh-handler';
@@ -29,9 +29,17 @@ authRouter.post('/register', registerRateLimit, registerHandler);
 
 /**
  * POST /api/v1/auth/login
- * Headers: X-Tenant-Id (required), X-Client-Mutation-Id (required for idempotency)
+ * Headers: X-Tenant-Id (required)
  * Body:    LoginRequest
  * Returns: LoginResponse (RS256 access + refresh tokens, full user + permissions)
+ *
+ * NOTE: this route does NOT run the shared `idempotency()` middleware — it
+ * requires a resolved TenantContext (from a verified Supabase JWT), which
+ * doesn't exist yet at login. login-handler never reads X-Client-Mutation-Id
+ * either. That's acceptable here because a retried login is naturally
+ * idempotent (it just re-authenticates; it doesn't create duplicate state)
+ * — unlike /seats below, which provisions a new row per call and does need
+ * the guard.
  */
 authRouter.post('/login', loginRateLimit, loginHandler);
 
@@ -62,6 +70,8 @@ authRouter.post('/logout-all', logoutAllHandler);
  * POST /api/v1/auth/seats
  * Provision a new MANAGER or STAFF seat within the tenant.
  * Requires: users:create (OWNER only)
+ * Headers: X-Client-Mutation-Id (required) — a retried request with the same
+ * id replays the original result instead of provisioning a second seat.
  */
 authRouter.get(
   '/seats',
@@ -74,6 +84,7 @@ authRouter.post(
   '/seats',
   tenantContextMiddleware,
   requirePermission('users:create'),
+  idempotency(redis),
   createSeatHandler,
 );
 
