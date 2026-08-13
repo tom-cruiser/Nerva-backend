@@ -54,12 +54,31 @@ export type SyncPayloadInput = z.infer<typeof syncPayloadSchema>;
 
 // ─── Per-collection data shapes (validated inside the service) ────────────────
 
+/** Up to 3 decimal places — matches inventories.stock_quantity's
+ *  DECIMAL(12,3), so a value that can't round-trip through that column
+ *  exactly is rejected here rather than silently truncated in Postgres. */
+const decimalQuantity = (positive: boolean) => {
+  const base = positive ? z.number().positive() : z.number().nonnegative();
+  return base.refine(
+    // Tolerance guards against float representation noise (e.g. 1.1 * 1000
+    // === 1100.0000000000002) rather than a genuine 4th-decimal-place value.
+    (n) => Math.abs(n * 1000 - Math.round(n * 1000)) < 1e-6,
+    { message: 'must have at most 3 decimal places' },
+  );
+};
+
 export const saleDataSchema = z.object({
   transaction_id:  z.string().min(1),
   customer_id:     z.string().uuid().optional(),
   items_sold:      z.array(z.object({
     product_sku: z.string().min(1),
-    quantity:    z.number().int().positive(),
+    quantity:    decimalQuantity(true),
+    // The selling unit this line item was rung up in (e.g. 'Carton', 'Kg').
+    // Omitted/absent = already in the product's base_unit — fully backward
+    // compatible with every sale payload that predates unit-of-measure
+    // support. See services/inventory/src/routes for product_units, and
+    // sync-service.ts's reserveStockForSale for the conversion lookup.
+    unit:        z.string().min(1).optional(),
     unit_price:  z.number().nonnegative(),
     total:       z.number().nonnegative(),
   })).min(1),
@@ -77,7 +96,7 @@ export const inventoryDataSchema = z.object({
   barcode:        z.string().optional(),
   description:    z.string().optional(),
   unit_price:     z.number().nonnegative(),
-  stock_quantity: z.number().int().nonnegative(),
+  stock_quantity: decimalQuantity(false),
   reorder_level:  z.number().int().nonnegative().default(0),
   category:       z.string().optional(),
 });

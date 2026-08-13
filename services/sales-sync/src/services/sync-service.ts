@@ -127,34 +127,133 @@ class InsufficientStockError extends Error {
   }
 }
 
+/** A sale line item named a selling unit that isn't the product's base_unit
+ *  and has no matching (non-deleted) product_units row — rejected outright
+ *  rather than silently deducted at conversion factor 1, which would
+ *  under/over-deduct stock without anyone noticing. */
+class UnknownUnitError extends Error {
+  constructor(public readonly sku: string, public readonly unit: string) {
+    super(`Unknown selling unit "${unit}" for ${sku}`);
+  }
+}
+
+/** One line item's post-deduction stock landed at/below its reorder_level —
+ *  returned to the caller so processSale() can log it to
+ *  inventory_reorder_logs once the sale row itself exists (see the
+ *  FK-sequencing note on that call site). */
+interface ReorderCrossing {
+  productId:                string;
+  productSku:               string;
+  stockAtTrigger:           number;
+  reorderLevelAtTrigger:    number;
+  reorderQuantityAtTrigger: number | null;
+}
+
 /**
  * Atomically decrement stock for every line item of a sale. All-or-nothing:
- * if any SKU is missing or doesn't have enough stock, every decrement already
- * applied in this call is rolled back via a savepoint so the sale itself is
- * never inserted with only some of its items reserved.
+ * if any SKU is missing, names an unrecognized selling unit, or doesn't have
+ * enough stock, every decrement already applied in this call is rolled back
+ * via a savepoint so the sale itself is never inserted with only some of its
+ * items reserved.
+ *
+ * Each item's `quantity` is always in the SELLING unit named by `unit`
+ * (omitted = the product's own base_unit, matching every sale payload that
+ * predates unit-of-measure support — fully backward compatible). The actual
+ * deduction against `inventories.stock_quantity` always happens in base-unit
+ * terms, computed in SQL (`numeric` arithmetic) rather than JS floats, to
+ * avoid float-precision drift against the DECIMAL(12,3) column.
  */
 async function reserveStockForSale(
   client:   PoolClient,
   tenantId: string,
-  items:    { product_sku: string; quantity: number }[],
-): Promise<void> {
+  items:    { product_sku: string; quantity: number; unit?: string }[],
+): Promise<ReorderCrossing[]> {
+  const crossings: ReorderCrossing[] = [];
+
   await client.query('SAVEPOINT sale_stock_reservation');
   try {
     for (const item of items) {
-      const result = await client.query(
+      if (!item.unit) {
+        // Fast path — identical behavior to before unit-of-measure support.
+        const result = await client.query<{
+          id: string; stock_quantity: string; reorder_level: number; reorder_quantity: string | null;
+        }>(
+          `UPDATE inventories
+           SET stock_quantity = stock_quantity - $3,
+               version        = version + 1,
+               updated_at     = NOW()
+           WHERE tenant_id = $1 AND product_sku = $2 AND deleted_at IS NULL
+             AND stock_quantity >= $3
+           RETURNING id, stock_quantity, reorder_level, reorder_quantity`,
+          [tenantId, item.product_sku, item.quantity],
+        );
+        if (!result.rowCount) {
+          throw new InsufficientStockError(item.product_sku);
+        }
+        const row = result.rows[0];
+        if (Number(row.stock_quantity) <= row.reorder_level) {
+          crossings.push({
+            productId: row.id, productSku: item.product_sku,
+            stockAtTrigger: Number(row.stock_quantity), reorderLevelAtTrigger: row.reorder_level,
+            reorderQuantityAtTrigger: row.reorder_quantity !== null ? Number(row.reorder_quantity) : null,
+          });
+        }
+        continue;
+      }
+
+      // Unit-of-measure path — lock the product row first so the base_unit
+      // comparison and the eventual deduction see a consistent snapshot.
+      const productResult = await client.query<{
+        id: string; base_unit: string; reorder_level: number; reorder_quantity: string | null;
+      }>(
+        `SELECT id, base_unit, reorder_level, reorder_quantity
+         FROM inventories
+         WHERE tenant_id = $1 AND product_sku = $2 AND deleted_at IS NULL
+         FOR UPDATE`,
+        [tenantId, item.product_sku],
+      );
+      if (!productResult.rowCount) {
+        throw new InsufficientStockError(item.product_sku);
+      }
+      const product = productResult.rows[0];
+
+      let conversionFactor = '1';
+      if (item.unit !== product.base_unit) {
+        const unitResult = await client.query<{ conversion_factor: string }>(
+          `SELECT conversion_factor FROM product_units
+           WHERE tenant_id = $1 AND product_id = $2 AND unit_name = $3 AND deleted_at IS NULL`,
+          [tenantId, product.id, item.unit],
+        );
+        if (!unitResult.rowCount) {
+          throw new UnknownUnitError(item.product_sku, item.unit);
+        }
+        conversionFactor = unitResult.rows[0].conversion_factor;
+      }
+
+      const result = await client.query<{ stock_quantity: string }>(
         `UPDATE inventories
-         SET stock_quantity = stock_quantity - $3,
+         SET stock_quantity = stock_quantity - ($3::numeric * $4::numeric),
              version        = version + 1,
              updated_at     = NOW()
-         WHERE tenant_id = $1 AND product_sku = $2 AND deleted_at IS NULL
-           AND stock_quantity >= $3`,
-        [tenantId, item.product_sku, item.quantity],
+         WHERE id = $1 AND tenant_id = $2
+           AND stock_quantity >= ($3::numeric * $4::numeric)
+         RETURNING stock_quantity`,
+        [product.id, tenantId, item.quantity, conversionFactor],
       );
       if (!result.rowCount) {
         throw new InsufficientStockError(item.product_sku);
       }
+      const newStock = Number(result.rows[0].stock_quantity);
+      if (newStock <= product.reorder_level) {
+        crossings.push({
+          productId: product.id, productSku: item.product_sku,
+          stockAtTrigger: newStock, reorderLevelAtTrigger: product.reorder_level,
+          reorderQuantityAtTrigger: product.reorder_quantity !== null ? Number(product.reorder_quantity) : null,
+        });
+      }
     }
     await client.query('RELEASE SAVEPOINT sale_stock_reservation');
+    return crossings;
   } catch (err) {
     await client.query('ROLLBACK TO SAVEPOINT sale_stock_reservation');
     throw err;
@@ -229,10 +328,18 @@ async function processSale(
       return;
     }
 
+    // Generated BEFORE reserveStockForSale (not after, as before this
+    // change) — inventory_reorder_logs.triggered_by_sale_id needs a real
+    // sales.id to reference, and Postgres checks FK constraints immediately,
+    // not deferred. The reorder-log rows themselves are only written once
+    // the `sales` INSERT below actually succeeds.
+    const serverId = uuidv4();
+
+    let reorderCrossings: Awaited<ReturnType<typeof reserveStockForSale>>;
     try {
-      await reserveStockForSale(client, tenantId, d.items_sold);
+      reorderCrossings = await reserveStockForSale(client, tenantId, d.items_sold);
     } catch (err) {
-      const reason = err instanceof InsufficientStockError
+      const reason = (err instanceof InsufficientStockError || err instanceof UnknownUnitError)
         ? err.message
         : 'Failed to reserve stock for this sale';
       rejected.push({
@@ -242,7 +349,6 @@ async function processSale(
       return;
     }
 
-    const serverId = uuidv4();
     await client.query(
       `INSERT INTO sales
          (id, tenant_id, transaction_id, customer_id, items_sold, total_amount,
@@ -259,6 +365,23 @@ async function processSale(
       ],
     );
     await writeAuditLog(client, tenantId, 'sale', serverId, 'CREATE', workerTag, null, d);
+
+    // Now that the sale row exists, log any reorder-threshold crossings from
+    // this sale's deductions — an append-only event log, not a mutable
+    // status column (see inventory_reorder_logs's migration comment for why).
+    for (const crossing of reorderCrossings) {
+      await client.query(
+        `INSERT INTO inventory_reorder_logs
+           (tenant_id, product_id, product_sku, stock_at_trigger,
+            reorder_level_at_trigger, reorder_quantity_at_trigger, triggered_by_sale_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          tenantId, crossing.productId, crossing.productSku, crossing.stockAtTrigger,
+          crossing.reorderLevelAtTrigger, crossing.reorderQuantityAtTrigger, serverId,
+        ],
+      );
+    }
+
     accepted.push({
       id: change.id, server_id: serverId,
       action: SyncAction.CREATE, collection: SyncCollection.SALES,
