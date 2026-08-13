@@ -11,39 +11,12 @@
  *   - All mutation requests carry `clientMutationId` for idempotency
  */
 
-import type { UserRole } from './tenant-context';
-
-// ─── Auth ─────────────────────────────────────────────────────────────────────
-
-export interface LoginRequest {
-  email:            string;
-  password:         string;
-  clientMutationId: string; // UUIDv4 — maps to X-Client-Mutation-Id header
-}
-
-export interface LoginResponse {
-  accessToken:  string;
-  refreshToken: string;
-  expiresIn:    number;   // seconds
-  tokenType:    'Bearer';
-  user: {
-    id:          string;
-    tenantId:    string;
-    email:       string;
-    role:        UserRole;
-    workerTag:   string;
-    permissions: string[];
-  };
-}
-
-export interface RefreshTokenRequest {
-  refreshToken: string;
-}
-
-export interface RefreshTokenResponse {
-  accessToken: string;
-  expiresIn:   number;
-}
+// NOTE: this file used to also declare LoginRequest/LoginResponse/
+// RefreshTokenRequest/RefreshTokenResponse for the custom RS256 auth path
+// (services/auth-tenant's old /login, /refresh handlers). That path was
+// removed — real auth is Supabase's signInWithPassword() — so those types
+// were deleted as unused rather than left describing a route that no longer
+// exists.
 
 // ─── Inventory ────────────────────────────────────────────────────────────────
 

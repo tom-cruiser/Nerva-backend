@@ -8,6 +8,7 @@ import {
   corsMiddleware,
 } from '@retail/middleware';
 import { syncRouter } from './routes/sync-router';
+import { analyticsRouter } from './routes/analytics-router';
 
 // Start the BullMQ worker when the app module is loaded.
 // Import side-effect only — the worker registers itself with BullMQ.
@@ -31,6 +32,9 @@ app.get('/health', (_req, res) => {
 
 // All sync routes require a verified JWT tenant context
 app.use('/api/v1/sync', tenantContextMiddleware, syncRouter);
+// Tenant sales-report/registers analytics — mounted under the same /sync
+// prefix so no nginx/dev-gateway route change is needed (see analytics-router.ts).
+app.use('/api/v1/sync/analytics', tenantContextMiddleware, analyticsRouter);
 
 app.use(globalErrorHandler('sales-sync'));
 

@@ -154,6 +154,23 @@ services:
       - nerva-network
     restart: unless-stopped
 
+  realtime:
+    build:
+      context: .
+      dockerfile: services/realtime/Dockerfile
+    env_file: .env
+    environment:
+      PORT: 3008
+      NODE_ENV: development
+    ports:
+      - "3008:3008"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    networks:
+      - nerva-network
+    restart: unless-stopped
+
   # ── API Gateway (nginx) — single entry point for all backend services ────────
   gateway:
     image: nginx:1.25-alpine
@@ -169,6 +186,7 @@ services:
       - whatsapp-engine
       - shifts
       - superadmin
+      - realtime
     networks:
       - nerva-network
     restart: unless-stopped

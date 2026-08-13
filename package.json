@@ -12,7 +12,7 @@
     "migrate": "npm run migrate --workspace=packages/db",
     "migrate:dry": "npm run migrate:dry --workspace=packages/db",
     "migrate:rollback": "npm run migrate:rollback --workspace=packages/db",
-    "dev": "concurrently --kill-others-on-fail --prefix-colors \"cyan,green,yellow,magenta,blue,white,gray,red\" --names \"gateway,auth,inventory,sales,ledger,whatsapp,shifts,superadmin\" \"node dev-gateway.cjs\" \"npm run dev --workspace=services/auth-tenant\" \"npm run dev --workspace=services/inventory\" \"npm run dev --workspace=services/sales-sync\" \"npm run dev --workspace=services/ledger-payments\" \"npm run dev --workspace=services/whatsapp-engine\" \"npm run dev --workspace=services/shifts\" \"npm run dev --workspace=services/superadmin\"",
+    "dev": "concurrently --kill-others-on-fail --prefix-colors \"cyan,green,yellow,magenta,blue,white,gray,red,cyanBright\" --names \"gateway,auth,inventory,sales,ledger,whatsapp,shifts,superadmin,realtime\" \"node dev-gateway.cjs\" \"npm run dev --workspace=services/auth-tenant\" \"npm run dev --workspace=services/inventory\" \"npm run dev --workspace=services/sales-sync\" \"npm run dev --workspace=services/ledger-payments\" \"npm run dev --workspace=services/whatsapp-engine\" \"npm run dev --workspace=services/shifts\" \"npm run dev --workspace=services/superadmin\" \"npm run dev --workspace=services/realtime\"",
     "dev:gateway": "node dev-gateway.cjs",
     "dev:auth": "npm run dev --workspace=services/auth-tenant",
     "dev:inventory": "npm run dev --workspace=services/inventory",
@@ -21,6 +21,7 @@
     "dev:whatsapp": "npm run dev --workspace=services/whatsapp-engine",
     "dev:shifts": "npm run dev --workspace=services/shifts",
     "dev:superadmin": "npm run dev --workspace=services/superadmin",
+    "dev:realtime": "npm run dev --workspace=services/realtime",
     "dev:no-sync": "concurrently --kill-others-on-fail --prefix-colors \"cyan,green,yellow,magenta,gray\" --names \"gateway,auth,inventory,ledger,shifts\" \"node dev-gateway.cjs\" \"npm run dev --workspace=services/auth-tenant\" \"npm run dev --workspace=services/inventory\" \"npm run dev --workspace=services/ledger-payments\" \"npm run dev --workspace=services/shifts\""
   },
   "devDependencies": {

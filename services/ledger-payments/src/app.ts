@@ -41,7 +41,7 @@ app.get('/api/v1/ledger/test-direct', (req, res) => {
 });
 
 // ✅ DEBUG ROUTES - Shows all registered routes
-app.get('/debug/routes', (req, res) => {
+app.get('/debug/routes', (_req, res) => {
   console.log('[app] Debug routes called');
   const routes: any[] = [];
   const stack = (app as any)._router?.stack || [];

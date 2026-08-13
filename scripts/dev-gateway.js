@@ -2,18 +2,25 @@
 // scripts/dev-gateway.js
 
 const http = require('http');
+const net = require('net');
 
 const PORT = Number(process.env.GATEWAY_PORT || 8080);
 
 const ROUTES = [
     { prefix: '/api/v1/auth/',      port: 3001 },
     { prefix: '/api/v1/inventory/', port: 3002 },
-    { prefix: '/api/v1/sales/',     port: 3003 },
+    // NOTE: sales-sync only mounts /api/v1/sync (+ /api/v1/sync/analytics) —
+    // there was never an /api/v1/sales/* handler, so that stale route entry
+    // (always a 404) has been removed rather than kept as dead routing.
     { prefix: '/api/v1/sync/',      port: 3003 },
     { prefix: '/api/v1/ledger/',    port: 3004 },
     { prefix: '/api/v1/whatsapp/',  port: 3005 },
     { prefix: '/api/v1/shifts/',    port: 3006 },
     { prefix: '/api/v1/superadmin/', port: 3007 },
+    // services/realtime — Socket.IO's client defaults to polling GET/POST
+    // requests AND a ws:// upgrade both under this same path, so both the
+    // plain-HTTP proxy below and the upgrade handler need this route.
+    { prefix: '/socket.io/',        port: 3008 },
 ].sort((a, b) => b.prefix.length - a.prefix.length);
 
 function applyCors(req, res) {
@@ -68,6 +75,39 @@ const server = http.createServer((req, res) => {
     });
 
     req.pipe(proxyReq);
+});
+
+// WebSocket upgrade proxying — plain http.request (above) never fires for an
+// `Upgrade: websocket` request, Node emits a separate 'upgrade' event on the
+// server instead. Hand-rolled with a raw TCP socket (no added dependency,
+// matching this file's own "zero deps" design) rather than a full proxy
+// library: connect to the upstream, replay the original request line/headers,
+// then pipe both directions.
+server.on('upgrade', (req, clientSocket, head) => {
+    const route = ROUTES.find((r) => req.url.startsWith(r.prefix));
+    if (!route) {
+        clientSocket.destroy();
+        return;
+    }
+
+    const upstreamSocket = net.connect(route.port, '127.0.0.1', () => {
+        const requestLine = `${req.method} ${req.url} HTTP/${req.httpVersion}`;
+        const headerLines = [];
+        for (let i = 0; i < req.rawHeaders.length; i += 2) {
+            headerLines.push(`${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}`);
+        }
+        upstreamSocket.write(`${[requestLine, ...headerLines].join('\r\n')}\r\n\r\n`);
+        if (head && head.length) upstreamSocket.write(head);
+
+        upstreamSocket.pipe(clientSocket);
+        clientSocket.pipe(upstreamSocket);
+    });
+
+    upstreamSocket.on('error', (err) => {
+        console.error(`[dev-gateway] Upgrade upstream :${route.port} error`, err.message);
+        clientSocket.destroy();
+    });
+    clientSocket.on('error', () => upstreamSocket.destroy());
 });
 
 server.listen(PORT, () => {

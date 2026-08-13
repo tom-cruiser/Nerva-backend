@@ -6,11 +6,10 @@ import { requestId, tenantContextMiddleware, globalErrorHandler, corsMiddleware 
 import { webhookRouter } from './routes/webhook-router';
 import { whatsappRouter } from './routes/whatsapp-routes';
 import { reportRouter } from './routes/report-routes';
-import { 
-  getSession, 
-  listSessions, 
+import {
+  listSessions,
   getSessionStats,
-  startCleanupInterval,
+  stopCleanupInterval,
   shutdownAllSessions,
   setMessageHandler
 } from './lib/whatsapp-client';
@@ -164,8 +163,8 @@ if (process.env.NODE_ENV !== 'production') {
       }
 
       const response = await sendMessageFrom(tenantId, number, message);
-      res.json({ 
-        success: true, 
+      return res.json({
+        success: true,
         messageId: response?.id?._serialized || response?.id || 'unknown',
         tenantId,
         recipient: number,
@@ -173,9 +172,9 @@ if (process.env.NODE_ENV !== 'production') {
       });
     } catch (err: any) {
       console.error('[test] Error:', err);
-      res.status(500).json({ 
+      return res.status(500).json({
         success: false,
-        error: err.message || String(err) 
+        error: err.message || String(err)
       });
     }
   });
@@ -249,7 +248,11 @@ async function gracefulShutdown(signal: string) {
   try {
     // Stop accepting new requests (if using a load balancer)
     // For Express, we'll handle this in server.ts
-    
+
+    // Stop the periodic stale-session sweep (server.ts's startCleanupInterval)
+    // before tearing sessions down — no point letting it fire mid-shutdown.
+    stopCleanupInterval();
+
     // Cleanup WhatsApp sessions
     console.log('[whatsapp-engine] Shutting down WhatsApp sessions...');
     await shutdownAllSessions();

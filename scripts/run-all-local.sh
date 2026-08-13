@@ -21,6 +21,7 @@ SERVICES=(
     "whatsapp-engine:3005"
     "shifts:3006"
     "superadmin:3007"
+    "realtime:3008"
 )
 GATEWAY_PORT=8080
 REDIS_PORT=6379
@@ -368,6 +369,7 @@ main() {
     echo "  💬 WhatsApp:   http://localhost:$GATEWAY_PORT/api/v1/whatsapp/"
     echo "  🕒 Shifts:     http://localhost:$GATEWAY_PORT/api/v1/shifts/"
     echo "  🛡️  Superadmin: http://localhost:$GATEWAY_PORT/api/v1/superadmin/  (requires superadmin:access — see services/superadmin/scripts/grant-superadmin.ts)"
+    echo "  📡 Realtime:   ws://localhost:$GATEWAY_PORT/socket.io/  (WebSocket push + daily expiration cron, no REST API)"
     echo ""
     echo -e "${BLUE}Direct service ports (for debugging):${NC}"
     for service_info in "${SERVICES[@]}"; do

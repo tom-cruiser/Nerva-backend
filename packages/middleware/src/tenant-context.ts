@@ -35,14 +35,14 @@ export const tenantStore = new AsyncLocalStorage<TenantContext>();
  * the client. There is NO fallback to `user_metadata` — see the SupabaseClaims
  * comment below.
  */
-interface SupabaseAppMetadata {
+export interface SupabaseAppMetadata {
   tenant_id?:   string;
   role?:        string;
   permissions?: Permission[];
   worker_tag?:  string;
 }
 
-interface SupabaseClaims extends JWTPayload {
+export interface SupabaseClaims extends JWTPayload {
   email?:         string;
   app_metadata?:  SupabaseAppMetadata;
   // NOTE: user_metadata is intentionally NOT part of the trusted claim shape.
@@ -67,6 +67,44 @@ const ALLOWED_ALGS = ['ES256', 'RS256', 'EdDSA'];
 
 // GoTrue's issuer is the project's auth base URL.
 const ISSUER = `${env.SUPABASE_URL.replace(/\/$/u, '')}/auth/v1`;
+
+/**
+ * Thrown by verifySupabaseJwt() — `reason` lets callers reproduce the exact
+ * "expired vs. invalid" message distinction tenantContextMiddleware has
+ * always made, without each caller re-deriving it from the raw jose error.
+ */
+export class JwtVerificationError extends Error {
+  constructor(public readonly reason: 'expired' | 'invalid', message: string) {
+    super(message);
+    this.name = 'JwtVerificationError';
+  }
+}
+
+/**
+ * Verifies a raw bearer-token string against Supabase's JWKS (signature,
+ * issuer, audience, algorithm allowlist) and returns its claims. This is the
+ * one real implementation of "is this a genuine, current Supabase access
+ * token" in the cluster — factored out of tenantContextMiddleware so any
+ * other entry point that needs to authenticate a Supabase JWT outside a
+ * normal Express request/response cycle (e.g. services/realtime's
+ * Socket.IO handshake, which has no `req`/`res` to run this middleware
+ * against) can reuse it instead of re-declaring JWKS/issuer/audience.
+ */
+export async function verifySupabaseJwt(token: string): Promise<SupabaseClaims> {
+  try {
+    const { payload } = await jwtVerify(token, JWKS, {
+      algorithms: ALLOWED_ALGS,
+      issuer:     ISSUER,
+      audience:   env.SUPABASE_JWT_AUD,
+    });
+    return payload as SupabaseClaims;
+  } catch (err) {
+    if (err instanceof joseErrors.JWTExpired) {
+      throw new JwtVerificationError('expired', 'Token has expired. Please refresh.');
+    }
+    throw new JwtVerificationError('invalid', 'Invalid token format or signature');
+  }
+}
 
 // ─── Role mapping ─────────────────────────────────────────────────────────────
 
@@ -93,7 +131,7 @@ function toUserRole(raw: string | undefined): UserRole | null {
 // verification above is stateless (no DB round-trip), tenant status has to
 // be checked separately, here, on every request that resolves a tenant.
 
-export type TenantStatus = 'ACTIVE' | 'SUSPENDED' | 'DELETED';
+export type TenantStatus = 'ACTIVE' | 'SUSPENDED' | 'DELETED' | 'PENDING_APPROVAL';
 
 /**
  * Cache key for a tenant's lifecycle status. Exported so the superadmin
@@ -114,8 +152,35 @@ export function tenantStatusCacheKey(tenantId: string): string {
  *  same TTL, rather than a second, possibly-drifting magic number. */
 export const TENANT_STATUS_CACHE_TTL_SECONDS = 60;
 
+/**
+ * Write-through the tenant-status cache immediately — this, not TTL expiry,
+ * is what makes tenantContextMiddleware's rejection above "immediate"
+ * cluster-wide the moment a superadmin action (or the automated expiration
+ * cron in services/realtime) changes a tenant's status. Promoted here from
+ * a private per-file copy in services/superadmin/src/routes/
+ * superadmin-router.ts so every writer — the superadmin service AND the new
+ * cron job — shares the one canonical implementation instead of each
+ * re-declaring it.
+ */
+export async function setTenantStatusCache(tenantId: string, status: TenantStatus): Promise<void> {
+  try {
+    await redis.set(tenantStatusCacheKey(tenantId), status, 'EX', TENANT_STATUS_CACHE_TTL_SECONDS);
+  } catch (err) {
+    // Best-effort — the safety-net TTL on the read side, and the fact that a
+    // Postgres miss always re-checks Postgres, bound the blast radius of a
+    // failed cache write to at most TENANT_STATUS_CACHE_TTL_SECONDS of
+    // staleness, not an incorrect state forever.
+    console.error('[tenant-context] Failed to write-through tenant status cache', (err as Error).message);
+  }
+}
+
 function isTenantStatus(value: unknown): value is TenantStatus {
-  return value === 'ACTIVE' || value === 'SUSPENDED' || value === 'DELETED';
+  return (
+    value === 'ACTIVE' ||
+    value === 'SUSPENDED' ||
+    value === 'DELETED' ||
+    value === 'PENDING_APPROVAL'
+  );
 }
 
 /**
@@ -130,6 +195,16 @@ function isTenantStatus(value: unknown): value is TenantStatus {
  * clause returns zero rows rather than leaking another tenant's data.
  */
 export const PLATFORM_SENTINEL_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+
+/**
+ * Stands in for `performed_by`/`status_changed_by` (both `NOT NULL UUID`,
+ * no FK — same shape as the sentinel above) when a system process, not a
+ * human superadmin, makes the change — e.g. services/realtime's daily
+ * expiration cron auto-suspending a tenant whose trial/period lapsed. Never
+ * a real Supabase user id; distinguishable at a glance from any genuine
+ * actor id in `platform_audit_logs`/`tenants.status_changed_by`.
+ */
+export const SYSTEM_ACTOR_ID = '00000000-0000-0000-0000-000000000001';
 
 /**
  * Resolves a tenant's current lifecycle status, Redis-first with a Postgres
@@ -206,6 +281,103 @@ async function resolveMaintenanceMode(): Promise<boolean> {
   } catch (err) {
     console.error('[tenant-context] Postgres unavailable for maintenance-mode check — failing open (off)', (err as Error).message);
     return false;
+  }
+}
+
+// ─── Live per-user override (role/permission changes, deactivation) ───────────
+//
+// The JWT's app_metadata is a point-in-time snapshot from whenever this user
+// last logged in or last had their token refreshed — Supabase does not
+// retroactively rewrite an already-issued, unexpired access token when an
+// Admin changes that user's role/permissions/active-status afterward (see
+// services/auth-tenant's seats-handler.ts: updateSeatHandler,
+// deactivateSeatHandler). Banning in Supabase (also done by those handlers)
+// only blocks *new* token issuance (login/refresh) — it does not invalidate
+// a still-valid signed JWT for a relying party that only verifies the
+// signature, which is exactly what this middleware does above. Without a
+// live check, a worker whose ledger-access was just revoked (or who was
+// just deactivated) keeps their old permissions/access for up to their
+// JWT's remaining lifetime.
+//
+// This mirrors resolveTenantStatus() exactly (Redis-cached, Postgres
+// fallback, write-through on mutation) but scoped to one user's row instead
+// of one tenant's — same reasoning, same trade-offs (fails open on infra
+// outage; a superadmin/support-token identity with no `users` row simply
+// gets an empty override and falls through to JWT-derived defaults, which
+// is correct since those aren't tenant-scoped `users` rows at all).
+
+export interface UserOverride {
+  isActive:    boolean;
+  /** NULL = no override; use ROLE_PERMISSIONS[role] as before. */
+  permissions: Permission[] | null;
+}
+
+export function userOverrideCacheKey(userId: string): string {
+  return `user:override:${userId}`;
+}
+
+/** Same rationale as TENANT_STATUS_CACHE_TTL_SECONDS — safety-net TTL only;
+ *  seats-handler.ts writes through this cache as part of every role/
+ *  permissions/active-status mutation, so this bounds staleness to a missed
+ *  write-through, not the normal case. */
+export const USER_OVERRIDE_CACHE_TTL_SECONDS = 60;
+
+function isUserOverride(value: unknown): value is UserOverride {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    typeof (value as UserOverride).isActive === 'boolean'
+  );
+}
+
+async function resolveUserOverride(userId: string): Promise<UserOverride> {
+  const cacheKey = userOverrideCacheKey(userId);
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      const parsed: unknown = JSON.parse(cached);
+      if (isUserOverride(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.error('[tenant-context] Redis unavailable for user-override check, falling back to Postgres', (err as Error).message);
+  }
+
+  try {
+    const client = await getClient();
+    try {
+      const result = await client.query<{ is_active: boolean; permissions: Permission[] | null }>(
+        'SELECT is_active, permissions FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1',
+        [userId],
+      );
+      // No row (superadmin/support-token identity, or a users row not
+      // provisioned in this tenant-scoped table at all) → no override,
+      // caller falls through to JWT-derived role/permissions untouched.
+      const override: UserOverride = result.rows[0]
+        ? { isActive: result.rows[0].is_active, permissions: result.rows[0].permissions }
+        : { isActive: true, permissions: null };
+      redis.set(cacheKey, JSON.stringify(override), 'EX', USER_OVERRIDE_CACHE_TTL_SECONDS).catch(() => {});
+      return override;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('[tenant-context] Postgres unavailable for user-override check — failing open (active, no override)', (err as Error).message);
+    return { isActive: true, permissions: null };
+  }
+}
+
+/** Write-through the user-override cache immediately — called by
+ *  seats-handler.ts's updateSeatHandler/deactivateSeatHandler as part of
+ *  every mutation, exactly like setTenantStatusCache is called by the
+ *  superadmin tenant-lifecycle routes. This, not TTL expiry, is what makes
+ *  a role/permissions/active-status change reach the affected worker's very
+ *  next request instead of "eventually, within USER_OVERRIDE_CACHE_TTL_SECONDS". */
+export async function setUserOverrideCache(userId: string, override: UserOverride): Promise<void> {
+  try {
+    await redis.set(userOverrideCacheKey(userId), JSON.stringify(override), 'EX', USER_OVERRIDE_CACHE_TTL_SECONDS);
+  } catch (err) {
+    console.error('[tenant-context] Failed to write-through user-override cache', (err as Error).message);
   }
 }
 
@@ -341,14 +513,9 @@ export async function tenantContextMiddleware(
 
   let claims: SupabaseClaims;
   try {
-    const { payload } = await jwtVerify(token, JWKS, {
-      algorithms: ALLOWED_ALGS,
-      issuer:     ISSUER,
-      audience:   env.SUPABASE_JWT_AUD,
-    });
-    claims = payload as SupabaseClaims;
+    claims = await verifySupabaseJwt(token);
   } catch (err) {
-    if (err instanceof joseErrors.JWTExpired) {
+    if (err instanceof JwtVerificationError && err.reason === 'expired') {
       sendError(res, Errors.unauthorized('Token has expired. Please refresh.'));
     } else {
       sendError(res, Errors.unauthorized('Invalid token format or signature'));
@@ -411,6 +578,19 @@ export async function tenantContextMiddleware(
   if (tenantStatus === 'SUSPENDED') {
     sendError(res, Errors.locked(
       'This account has been suspended. Contact support to resolve this.',
+      { status: 'SUSPENDED' },
+    ));
+    return;
+  }
+  if (tenantStatus === 'PENDING_APPROVAL') {
+    // A newly self-registered tenant that a superadmin hasn't approved yet
+    // (see services/superadmin's POST /tenants/:id/approve). Same 423 shape
+    // as SUSPENDED so existing "locked" client handling covers it too, but
+    // the `details.status` lets a client distinguish the two messages if it
+    // wants to (e.g. "pending approval" vs "suspended").
+    sendError(res, Errors.locked(
+      'This workspace is pending approval. You will be notified once it is activated.',
+      { status: 'PENDING_APPROVAL' },
     ));
     return;
   }
@@ -421,16 +601,35 @@ export async function tenantContextMiddleware(
     return;
   }
 
+  // ── Live per-user override (role/permissions/active-status) ──────────────
+  // Checked even though the JWT already carries its own app_metadata
+  // snapshot — see the userOverride block above for why that snapshot can
+  // be stale. A deactivated worker is rejected here immediately, the same
+  // way a SUSPENDED tenant is rejected above.
+  const userOverride = await resolveUserOverride(userId);
+  if (!userOverride.isActive) {
+    sendError(res, Errors.locked(
+      'This account has been deactivated. Contact your store admin.',
+      { status: 'DEACTIVATED' },
+    ));
+    return;
+  }
+
   // Role from app_metadata; default to read-only VIEWER when unset.
   const role = toUserRole(meta.role) ?? 'VIEWER';
 
   // ── Permission resolution ─────────────────────────────────────────────────
-  // Prefer explicit permissions provisioned in app_metadata; otherwise derive
-  // from the role matrix.
+  // A live per-user override (see above) wins outright — it reflects an
+  // Admin's most recent seats-handler.ts change. Otherwise prefer explicit
+  // permissions provisioned in app_metadata; otherwise derive from the role
+  // matrix. Same three-tier precedence GRANTABLE_EXTRA_PERMISSIONS-style
+  // overrides have always conceptually had, just no longer gated on the
+  // JWT's staleness.
   const permissions: Permission[] =
-    Array.isArray(meta.permissions) && meta.permissions.length > 0
+    userOverride.permissions ??
+    (Array.isArray(meta.permissions) && meta.permissions.length > 0
       ? meta.permissions
-      : ROLE_PERMISSIONS[role];
+      : ROLE_PERMISSIONS[role]);
 
   const ctx: TenantContext = {
     tenantId,

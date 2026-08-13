@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z }                from 'zod';
 import { getClient, query } from '@retail/db';
-import { getTenantContext, Errors, sendError, requirePermission } from '@retail/middleware';
+import { getTenantContext, Errors, requirePermission } from '@retail/middleware';
 
 /**
  * Batch / expiry / markdown routes for the inventory service.

@@ -76,10 +76,15 @@ export async function registerHandler(
       (req.headers['x-client-mutation-id'] as string | undefined)?.replace(/-/gu, '') ??
       Date.now().toString(36);
 
+    // Self-serve signups land PENDING_APPROVAL, not ACTIVE — a superadmin
+    // must approve the workspace (POST /api/v1/superadmin/tenants/:id/approve)
+    // before it can be used. See packages/db/src/migrations/
+    // 014_tenant_pending_approval.sql and tenant-context.ts's status gate.
     const tenantId = await ensureTenant({
       name:     orgName,
       slug:     toSlug(orgName, entropy),
       currency,
+      initialStatus: 'PENDING_APPROVAL',
     });
 
     const owner = await provisionUser({
@@ -94,6 +99,7 @@ export async function registerHandler(
       organization_name: orgName,
       billing_tier:      'starter',
       currency,
+      status:            'PENDING_APPROVAL',
       owner: {
         id:        owner.userId,
         tenantId:  owner.tenantId,

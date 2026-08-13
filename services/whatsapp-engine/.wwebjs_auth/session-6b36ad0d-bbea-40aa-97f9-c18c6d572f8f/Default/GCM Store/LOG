@@ -1,2 +1,3 @@
-2026/08/12-13:40:40.025 1f3e3 Creating DB /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/GCM Store since it was missing.
-2026/08/12-13:40:40.037 1f3e3 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/GCM Store/MANIFEST-000001
+2026/08/13-13:45:01.253 1fe5e Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/GCM Store/MANIFEST-000001
+2026/08/13-13:45:01.255 1fe5e Recovering log #3
+2026/08/13-13:45:01.256 1fe5e Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/GCM Store/000003.log 

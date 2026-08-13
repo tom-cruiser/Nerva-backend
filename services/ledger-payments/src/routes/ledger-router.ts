@@ -18,7 +18,7 @@ const router = Router();
 const idempotent = idempotency(redis);
 
 // ─── TEST ROUTE ──────────────────────────────────────────────────────────────
-router.get('/test', (req: Request, res: Response) => {
+router.get('/test', (_req: Request, res: Response) => {
   console.log('[ledger] ✅ Test endpoint called!');
   res.json({
     status: 'ok',
@@ -239,7 +239,7 @@ function generateCSV(data: Array<Record<string, any>>): string {
 
 // ─── GET /api/v1/ledger/customers ──────────────────────────────────────────
 
-router.get('/customers', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/customers', requirePermission('ledger:read'), async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const orgId = ctx.tenantId;
@@ -416,7 +416,7 @@ router.post('/customers', requirePermission('ledger:create'), idempotent, async 
 
 // ─── GET /api/v1/ledger/customers/:customerId ─────────────────────────────
 
-router.get('/customers/:customerId', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/customers/:customerId', requirePermission('ledger:read'), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const { customerId } = req.params;
@@ -534,7 +534,7 @@ router.patch('/customers/:customerId', requirePermission('ledger:update'), idemp
 
 // ─── GET /api/v1/ledger/customers/:customerId/balance ────────────────────
 
-router.get('/customers/:customerId/balance', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/customers/:customerId/balance', requirePermission('ledger:read'), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const { customerId } = req.params;
@@ -568,7 +568,7 @@ router.get('/customers/:customerId/balance', async (req: Request, res: Response,
 // ─── GET /api/v1/ledger/customers/:customerId/transactions ───────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.get('/customers/:customerId/transactions', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/customers/:customerId/transactions', requirePermission('ledger:read'), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const { customerId } = req.params;
@@ -637,7 +637,7 @@ router.get('/customers/:customerId/transactions', async (req: Request, res: Resp
 // ─── GET /api/v1/ledger/transactions ──────────────────────────────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.get('/transactions', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/transactions', requirePermission('ledger:read'), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const { 
@@ -930,7 +930,7 @@ router.post('/customers/:customerId/credit', requirePermission('ledger:credit'),
 // ─── GET /api/v1/ledger/summary ─────────────────────────────────────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.get('/summary', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/summary', requirePermission('ledger:read'), async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const orgId = ctx.tenantId;
@@ -1228,7 +1228,7 @@ router.post('/payments/momo', requirePermission('ledger:payment'), idempotent, a
 // ─── GET /api/v1/ledger/export ─────────────────────────────────────────────
 // ✅ FIXED: Using ledger_entries instead of ledger_transactions
 
-router.get('/export', async (req: Request, res: Response, next: NextFunction) => {
+router.get('/export', requirePermission('ledger:read'), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const ctx = getTenantContext(res);
     const { fromDate, toDate, customerId, format = 'csv' } = req.query;

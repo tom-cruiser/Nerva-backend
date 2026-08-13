@@ -36,7 +36,7 @@ export function formatReportMessage(
 
   // Categories
   summary.revenueByCategory.forEach(category => {
-    const percentage = (category.revenue / summary.totalSales) * 100;
+    const percentage = summary.totalSales > 0 ? (category.revenue / summary.totalSales) * 100 : 0;
     const bar = '█'.repeat(Math.round(percentage / 5));
     lines.push(`${category.category}: $${formatCurrency(category.revenue)} (${percentage.toFixed(1)}%)`);
     lines.push(`  ${bar}${'░'.repeat(20 - bar.length)}`);
@@ -48,8 +48,8 @@ export function formatReportMessage(
 
   // Payment methods
   summary.paymentMethods.forEach(method => {
-    const percentage = (method.amount / summary.totalSales) * 100;
-    lines.push(`${method.method}: $${formatCurrency(method.amount)} (${method.count} transactions)`);
+    const percentage = summary.totalSales > 0 ? (method.amount / summary.totalSales) * 100 : 0;
+    lines.push(`${method.method}: $${formatCurrency(method.amount)} (${method.count} transactions, ${percentage.toFixed(1)}%)`);
   });
 
   lines.push('');

@@ -431,4 +431,452 @@ inventoryRouter.delete(
   },
 );
 
+// =============================================================================
+// PRODUCT VARIANTS  (packages/db/src/migrations/015_inventory_variants_and_suppliers.sql)
+// =============================================================================
+
+interface VariantRow {
+  id:             string;
+  product_id:     string;
+  variant_sku:    string;
+  variant_name:   string;
+  unit_price:     string | null; // DECIMAL comes back as string; NULL = inherits parent price
+  stock_quantity: number;
+  version:        number;
+  created_at:     string;
+  updated_at:     string;
+  deleted_at:     string | null;
+}
+
+function toVariant(row: VariantRow) {
+  return {
+    id:             row.id,
+    product_id:     row.product_id,
+    variant_sku:    row.variant_sku,
+    variant_name:   row.variant_name,
+    unit_price:     row.unit_price === null ? null : parseFloat(row.unit_price),
+    stock_quantity: row.stock_quantity,
+    version:        row.version,
+    created_at:     row.created_at,
+    updated_at:     row.updated_at,
+    deleted_at:     row.deleted_at,
+  };
+}
+
+const VARIANT_COLS = `
+  id, product_id, variant_sku, variant_name,
+  unit_price, stock_quantity, version, created_at, updated_at, deleted_at
+`;
+
+/** Confirm the parent product exists for this tenant (404s otherwise). */
+async function requireProduct(tenantId: string, productId: string): Promise<{ id: string; product_sku: string } | null> {
+  const result = await query<{ id: string; product_sku: string }>(
+    `SELECT id, product_sku FROM inventories WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL LIMIT 1`,
+    [tenantId, productId],
+  );
+  return result.rows[0] ?? null;
+}
+
+// ─── GET /api/v1/inventory/products/:id/variants ─────────────────────────────
+
+inventoryRouter.get(
+  '/products/:id/variants',
+  requirePermission('inventory:read'),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const ctx = getTenantContext(res);
+      const product = await requireProduct(ctx.tenantId, req.params.id);
+      if (!product) return next(Errors.notFound('Product not found'));
+
+      const result = await query<VariantRow>(
+        `SELECT ${VARIANT_COLS}
+         FROM product_variants
+         WHERE tenant_id = $1 AND product_id = $2 AND deleted_at IS NULL
+         ORDER BY variant_name ASC`,
+        [ctx.tenantId, req.params.id],
+      );
+
+      res.status(200).json({ variants: result.rows.map(toVariant) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── POST /api/v1/inventory/products/:id/variants ────────────────────────────
+
+const createVariantSchema = z.object({
+  variant_sku:    z.string().min(1).max(50),
+  variant_name:   z.string().min(1).max(255),
+  unit_price:     z.number().nonnegative().nullable().optional(),
+  stock_quantity: z.number().int().nonnegative().default(0),
+});
+
+inventoryRouter.post(
+  '/products/:id/variants',
+  requirePermission('inventory:create'),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const ctx = getTenantContext(res);
+      const parsed = createVariantSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return next(
+          Errors.invalidRequest('Variant validation failed', {
+            issues: parsed.error.issues.map((i) => ({ path: i.path, message: i.message })),
+          }),
+        );
+      }
+
+      const product = await requireProduct(ctx.tenantId, req.params.id);
+      if (!product) return next(Errors.notFound('Product not found'));
+
+      const d   = parsed.data;
+      const sku = d.variant_sku.toUpperCase();
+      const client = await getClient();
+
+      try {
+        await client.query('BEGIN');
+
+        const result = await client.query<VariantRow>(
+          `INSERT INTO product_variants
+             (tenant_id, product_id, variant_sku, variant_name,
+              unit_price, stock_quantity, created_by, updated_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+           RETURNING ${VARIANT_COLS}`,
+          [ctx.tenantId, req.params.id, sku, d.variant_name, d.unit_price ?? null, d.stock_quantity, ctx.userId],
+        );
+
+        const created = result.rows[0]!;
+
+        await client.query(
+          `INSERT INTO audit_logs
+             (tenant_id, entity_type, entity_id, action, worker_tag, new_values)
+           VALUES ($1, 'product_variant', $2, 'CREATE', $3, $4::jsonb)`,
+          [ctx.tenantId, created.id, ctx.workerTag, JSON.stringify(d)],
+        );
+
+        await client.query('COMMIT');
+        res.status(201).json(toVariant(created));
+      } catch (err: unknown) {
+        await client.query('ROLLBACK');
+        if ((err as { code?: string }).code === '23505') {
+          return next(Errors.conflict(`A variant with SKU "${sku}" already exists`));
+        }
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── PATCH /api/v1/inventory/variants/:id ────────────────────────────────────
+
+const patchVariantSchema = z.object({
+  variant_name:   z.string().min(1).max(255).optional(),
+  unit_price:     z.number().nonnegative().nullable().optional(),
+  stock_quantity: z.number().int().nonnegative().optional(),
+  /** Optimistic lock — send the version you last read. */
+  version:        z.number().int().positive(),
+}).refine(
+  (d) => Object.keys(d).some((k) => k !== 'version'),
+  'At least one field besides version must be provided',
+);
+
+inventoryRouter.patch(
+  '/variants/:id',
+  requirePermission('inventory:update'),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const ctx = getTenantContext(res);
+      const { id } = req.params;
+      const parsed = patchVariantSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return next(
+          Errors.invalidRequest('Update validation failed', {
+            issues: parsed.error.issues.map((i) => ({ path: i.path, message: i.message })),
+          }),
+        );
+      }
+
+      const { version, ...fields } = parsed.data;
+      const setClauses: string[] = ['version = $3', 'updated_by = $4', 'updated_at = NOW()'];
+      const params: unknown[] = [ctx.tenantId, id, version + 1, ctx.userId];
+
+      const updatableFields = ['variant_name', 'unit_price', 'stock_quantity'] as const;
+      for (const field of updatableFields) {
+        if (field in fields && fields[field] !== undefined) {
+          params.push(fields[field as keyof typeof fields]);
+          setClauses.push(`${field} = $${params.length}`);
+        }
+      }
+
+      const client = await getClient();
+      try {
+        await client.query('BEGIN');
+
+        const before = await client.query<VariantRow>(
+          `SELECT ${VARIANT_COLS}
+           FROM product_variants
+           WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [ctx.tenantId, id],
+        );
+
+        if (!before.rows[0]) {
+          await client.query('ROLLBACK');
+          return next(Errors.notFound('Variant not found'));
+        }
+
+        if (before.rows[0].version !== version) {
+          await client.query('ROLLBACK');
+          return next(
+            Errors.conflict('Optimistic lock conflict — variant was modified by another request', {
+              expected: version,
+              current:  before.rows[0].version,
+            }),
+          );
+        }
+
+        const result = await client.query<VariantRow>(
+          `UPDATE product_variants
+           SET ${setClauses.join(', ')}
+           WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+           RETURNING ${VARIANT_COLS}`,
+          params,
+        );
+
+        await client.query(
+          `INSERT INTO audit_logs
+             (tenant_id, entity_type, entity_id, action, worker_tag, old_values, new_values)
+           VALUES ($1, 'product_variant', $2, 'UPDATE', $3, $4::jsonb, $5::jsonb)`,
+          [ctx.tenantId, id, ctx.workerTag, JSON.stringify(toVariant(before.rows[0])), JSON.stringify(fields)],
+        );
+
+        await client.query('COMMIT');
+        res.status(200).json(toVariant(result.rows[0]!));
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── DELETE /api/v1/inventory/variants/:id ───────────────────────────────────
+
+inventoryRouter.delete(
+  '/variants/:id',
+  requirePermission('inventory:delete'),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const ctx = getTenantContext(res);
+      const { id } = req.params;
+      const client = await getClient();
+
+      try {
+        await client.query('BEGIN');
+
+        const result = await client.query<{ id: string; variant_sku: string }>(
+          `UPDATE product_variants
+           SET deleted_at = NOW(), updated_at = NOW()
+           WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+           RETURNING id, variant_sku`,
+          [ctx.tenantId, id],
+        );
+
+        if (!result.rows[0]) {
+          await client.query('ROLLBACK');
+          return next(Errors.notFound('Variant not found'));
+        }
+
+        await client.query(
+          `INSERT INTO audit_logs
+             (tenant_id, entity_type, entity_id, action, worker_tag, new_values)
+           VALUES ($1, 'product_variant', $2, 'SOFT_DELETE', $3, $4::jsonb)`,
+          [ctx.tenantId, id, ctx.workerTag, JSON.stringify({ variant_sku: result.rows[0].variant_sku })],
+        );
+
+        await client.query('COMMIT');
+        res.status(204).end();
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// =============================================================================
+// SUPPLIER LOGS  (packages/db/src/migrations/015_inventory_variants_and_suppliers.sql)
+// =============================================================================
+
+interface SupplierLogRow {
+  id:                string;
+  product_id:        string;
+  product_sku:       string;
+  supplier_name:     string;
+  supplier_contact:  string | null;
+  quantity_received: number;
+  unit_cost:         string | null;
+  received_at:       string;
+  notes:             string | null;
+  created_at:        string;
+}
+
+function toSupplierLog(row: SupplierLogRow) {
+  return {
+    id:                row.id,
+    product_id:        row.product_id,
+    product_sku:       row.product_sku,
+    supplier_name:     row.supplier_name,
+    supplier_contact:  row.supplier_contact,
+    quantity_received: row.quantity_received,
+    unit_cost:         row.unit_cost === null ? null : parseFloat(row.unit_cost),
+    received_at:       row.received_at,
+    notes:             row.notes,
+    created_at:        row.created_at,
+  };
+}
+
+const SUPPLIER_LOG_COLS = `
+  id, product_id, product_sku, supplier_name, supplier_contact,
+  quantity_received, unit_cost, received_at, notes, created_at
+`;
+
+// ─── GET /api/v1/inventory/products/:id/supplier-logs ────────────────────────
+
+inventoryRouter.get(
+  '/products/:id/supplier-logs',
+  requirePermission('inventory:read'),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const ctx = getTenantContext(res);
+      const product = await requireProduct(ctx.tenantId, req.params.id);
+      if (!product) return next(Errors.notFound('Product not found'));
+
+      const limit  = Math.min(Math.max(parseInt(String(req.query['limit']  ?? 50), 10), 1), 200);
+      const offset = Math.max(parseInt(String(req.query['offset'] ?? 0), 10), 0);
+
+      const result = await query<SupplierLogRow>(
+        `SELECT ${SUPPLIER_LOG_COLS}
+         FROM supplier_logs
+         WHERE tenant_id = $1 AND product_id = $2 AND deleted_at IS NULL
+         ORDER BY received_at DESC
+         LIMIT $3 OFFSET $4`,
+        [ctx.tenantId, req.params.id, limit, offset],
+      );
+
+      res.status(200).json({ supplier_logs: result.rows.map(toSupplierLog) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── POST /api/v1/inventory/products/:id/supplier-logs ───────────────────────
+//
+// Recording a delivery also moves the needle on-hand: this is a *receiving*
+// log, not a passive note, so it atomically bumps inventories.stock_quantity
+// by quantity_received in the same transaction as the log insert. The
+// resulting stock change is captured on the same audit_logs row as the log
+// entry (details.stock_quantity_delta) rather than a second row, since it's
+// one logical event.
+
+const createSupplierLogSchema = z.object({
+  supplier_name:     z.string().min(1).max(255),
+  supplier_contact:  z.string().max(255).nullable().optional(),
+  quantity_received: z.number().int().positive(),
+  unit_cost:         z.number().nonnegative().nullable().optional(),
+  received_at:       z.string().datetime().optional(),
+  notes:             z.string().nullable().optional(),
+});
+
+inventoryRouter.post(
+  '/products/:id/supplier-logs',
+  requirePermission('inventory:create'),
+  async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const ctx = getTenantContext(res);
+      const parsed = createSupplierLogSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return next(
+          Errors.invalidRequest('Supplier log validation failed', {
+            issues: parsed.error.issues.map((i) => ({ path: i.path, message: i.message })),
+          }),
+        );
+      }
+
+      const d = parsed.data;
+      const client = await getClient();
+
+      try {
+        await client.query('BEGIN');
+
+        const product = await client.query<{ id: string; product_sku: string }>(
+          `SELECT id, product_sku FROM inventories
+           WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
+           FOR UPDATE`,
+          [ctx.tenantId, req.params.id],
+        );
+        if (!product.rows[0]) {
+          await client.query('ROLLBACK');
+          return next(Errors.notFound('Product not found'));
+        }
+
+        const inserted = await client.query<SupplierLogRow>(
+          `INSERT INTO supplier_logs
+             (tenant_id, product_id, product_sku, supplier_name, supplier_contact,
+              quantity_received, unit_cost, received_at, notes, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::timestamptz, NOW()), $9, $10)
+           RETURNING ${SUPPLIER_LOG_COLS}`,
+          [
+            ctx.tenantId, req.params.id, product.rows[0].product_sku,
+            d.supplier_name, d.supplier_contact ?? null,
+            d.quantity_received, d.unit_cost ?? null,
+            d.received_at ?? null, d.notes ?? null, ctx.userId,
+          ],
+        );
+
+        await client.query(
+          `UPDATE inventories
+           SET stock_quantity = stock_quantity + $3, version = version + 1, updated_at = NOW(), updated_by = $4
+           WHERE tenant_id = $1 AND id = $2`,
+          [ctx.tenantId, req.params.id, d.quantity_received, ctx.userId],
+        );
+
+        await client.query(
+          `INSERT INTO audit_logs
+             (tenant_id, entity_type, entity_id, action, worker_tag, new_values)
+           VALUES ($1, 'supplier_log', $2, 'CREATE', $3, $4::jsonb)`,
+          [
+            ctx.tenantId, inserted.rows[0]!.id, ctx.workerTag,
+            JSON.stringify({ ...d, stock_quantity_delta: d.quantity_received, product_id: req.params.id }),
+          ],
+        );
+
+        await client.query('COMMIT');
+        res.status(201).json(toSupplierLog(inserted.rows[0]!));
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 export { inventoryRouter };

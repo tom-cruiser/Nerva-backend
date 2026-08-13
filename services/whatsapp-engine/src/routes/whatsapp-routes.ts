@@ -20,7 +20,7 @@ const whatsappRouter = Router();
 
 // POST /connect - explicitly start (or resume) this tenant's WhatsApp session.
 // Call this once when the user clicks "Connect WhatsApp"; then poll /status.
-whatsappRouter.post('/connect', async (req, res, next) => {
+whatsappRouter.post('/connect', async (_req, res, next) => {
   let ctx;
   try {
     ctx = getTenantContext(res);
@@ -44,7 +44,7 @@ whatsappRouter.post('/connect', async (req, res, next) => {
 });
 
 // GET /status - poll THIS tenant's connection status / QR.
-whatsappRouter.get('/status', async (req, res, next) => {
+whatsappRouter.get('/status', async (_req, res, next) => {
   let ctx;
   try {
     ctx = getTenantContext(res);
@@ -204,7 +204,7 @@ whatsappRouter.post('/send-bulk', async (req, res, next) => {
 // ============================================
 
 // POST /logout - Logout and tear down THIS tenant's WhatsApp session
-whatsappRouter.post('/logout', async (req, res, next) => {
+whatsappRouter.post('/logout', async (_req, res, next) => {
   let ctx;
   try {
     ctx = getTenantContext(res);
@@ -232,7 +232,7 @@ whatsappRouter.post('/logout', async (req, res, next) => {
 // ============================================
 
 // GET /admin/sessions - List all active sessions (Admin only)
-whatsappRouter.get('/admin/sessions', requireSuperadmin(), async (req, res, next) => {
+whatsappRouter.get('/admin/sessions', requireSuperadmin(), async (_req, res, next) => {
   try {
     const sessions = listSessions();
     const stats = getSessionStats();
@@ -257,7 +257,7 @@ whatsappRouter.get('/admin/sessions', requireSuperadmin(), async (req, res, next
 });
 
 // POST /admin/cleanup - Manually trigger session cleanup (Admin only)
-whatsappRouter.post('/admin/cleanup', requireSuperadmin(), async (req, res, next) => {
+whatsappRouter.post('/admin/cleanup', requireSuperadmin(), async (_req, res, next) => {
   try {
     const { cleanupDeadSessions } = await import('../lib/whatsapp-client');
     await cleanupDeadSessions();
@@ -274,7 +274,7 @@ whatsappRouter.post('/admin/cleanup', requireSuperadmin(), async (req, res, next
 });
 
 // POST /admin/shutdown - Shutdown all sessions (Admin only)
-whatsappRouter.post('/admin/shutdown', requireSuperadmin(), async (req, res, next) => {
+whatsappRouter.post('/admin/shutdown', requireSuperadmin(), async (_req, res, next) => {
   try {
     const { shutdownAllSessions } = await import('../lib/whatsapp-client');
     await shutdownAllSessions();

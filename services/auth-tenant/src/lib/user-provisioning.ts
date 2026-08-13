@@ -36,6 +36,14 @@ export async function ensureTenant(input: {
   slug: string;
   currency?: string;
   timezone?: string;
+  /**
+   * Initial `tenants.status`. Defaults to 'ACTIVE' so every existing caller
+   * (notably scripts/provision-user.ts, an ops/dev CLI for bootstrapping a
+   * trusted tenant) keeps behaving exactly as before. register-handler.ts
+   * passes 'PENDING_APPROVAL' explicitly for self-serve signups — see
+   * packages/db/src/migrations/014_tenant_pending_approval.sql.
+   */
+  initialStatus?: 'ACTIVE' | 'PENDING_APPROVAL';
 }): Promise<string> {
   const slug = input.slug.toLowerCase().trim();
 
@@ -45,13 +53,41 @@ export async function ensureTenant(input: {
   );
   if (existing.rows[0]) return existing.rows[0].id;
 
-  const created = await query<{ id: string }>(
-    `INSERT INTO tenants (name, slug, currency, timezone)
-     VALUES ($1, $2, COALESCE($3, 'XAF'), COALESCE($4, 'UTC'))
-     RETURNING id`,
-    [input.name, slug, input.currency ?? null, input.timezone ?? null],
+  const created = await query<{ id: string; billing_tier: string }>(
+    `INSERT INTO tenants (name, slug, currency, timezone, status)
+     VALUES ($1, $2, COALESCE($3, 'XAF'), COALESCE($4, 'UTC'), $5)
+     RETURNING id, billing_tier`,
+    [input.name, slug, input.currency ?? null, input.timezone ?? null, input.initialStatus ?? 'ACTIVE'],
   );
-  return created.rows[0]!.id;
+  const tenantId = created.rows[0]!.id;
+
+  // Every tenant needs a `subscriptions` row — services/superadmin's
+  // subscriptions-router.ts (GET/change-plan/cancel/reactivate/billing-events)
+  // 404s on any tenant that doesn't have one, and migration 008's backfill
+  // only covered tenants that existed AT MIGRATION TIME. Without this, every
+  // tenant signing up afterward would be invisible to the superadmin
+  // billing tools. plan_code mirrors tenants.billing_tier (the column's own
+  // DEFAULT 'starter') so the two never disagree from the moment of creation;
+  // `status` is left to the column's own DEFAULT 'TRIALING' for the same
+  // single-source-of-truth reason. A 14-day trial is this product's default —
+  // adjust here if that policy ever changes.
+  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+  const subscription = await query<{ id: string }>(
+    `INSERT INTO subscriptions (tenant_id, plan_code, trial_ends_at)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (tenant_id) DO NOTHING
+     RETURNING id`,
+    [tenantId, created.rows[0]!.billing_tier, trialEndsAt],
+  );
+  if (subscription.rows[0]) {
+    await query(
+      `INSERT INTO billing_events (tenant_id, subscription_id, event_type, notes)
+       VALUES ($1, $2, 'TRIAL_STARTED', 'Trial started on signup')`,
+      [tenantId, subscription.rows[0].id],
+    );
+  }
+
+  return tenantId;
 }
 
 export interface ProvisionUserInput {
@@ -129,17 +165,27 @@ async function upsertAppUser(
 ): Promise<void> {
   await query(
     `INSERT INTO users
-       (id, tenant_id, email, hashed_password, full_name, role, worker_tag, is_active)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE)
+       (id, tenant_id, email, hashed_password, full_name, role, worker_tag, is_active, permissions)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8::jsonb)
      ON CONFLICT (id) DO UPDATE SET
-       tenant_id  = EXCLUDED.tenant_id,
+       tenant_id   = EXCLUDED.tenant_id,
        -- preserve existing email/full_name when the caller didn't supply them
-       email      = COALESCE(NULLIF(EXCLUDED.email, ''), users.email),
-       full_name  = COALESCE(EXCLUDED.full_name, users.full_name),
-       role       = EXCLUDED.role,
-       worker_tag = EXCLUDED.worker_tag,
-       is_active  = TRUE,
-       updated_at = NOW()`,
+       email       = COALESCE(NULLIF(EXCLUDED.email, ''), users.email),
+       full_name   = COALESCE(EXCLUDED.full_name, users.full_name),
+       role        = EXCLUDED.role,
+       worker_tag  = EXCLUDED.worker_tag,
+       -- preserve is_active on an UPDATE (not force TRUE) — a dedicated
+       -- deactivate/reactivate action (see seats-handler.ts's
+       -- updateSeatHandler/deactivateSeatHandler) owns this field. Forcing
+       -- TRUE here used to mean any metadata sync (a role change, a tenant
+       -- move) would silently reactivate a deactivated worker. Only a fresh
+       -- INSERT (no conflict) sets TRUE, via the VALUES clause above.
+       is_active   = users.is_active,
+       -- Mirrors app_metadata.permissions exactly (NULL = role-derived
+       -- defaults) — always written explicitly here, never merged, so this
+       -- column can never drift from what the caller just set in Supabase.
+       permissions = EXCLUDED.permissions,
+       updated_at  = NOW()`,
     [
       userId,
       meta.tenant_id,
@@ -148,6 +194,7 @@ async function upsertAppUser(
       fullName,
       meta.role,
       meta.worker_tag,
+      meta.permissions && meta.permissions.length > 0 ? JSON.stringify(meta.permissions) : null,
     ],
   );
 }
@@ -238,6 +285,16 @@ export interface SyncMetadataPatch {
   tenantId?:    string;
   role?:        ProvisionRole;
   permissions?: Permission[];
+  /**
+   * Explicitly remove any permissions override, reverting this user to the
+   * plain role-derived default (ROLE_PERMISSIONS[role]). Distinct from
+   * simply omitting `permissions`, which PRESERVES whatever override
+   * already exists — without this flag there was no way to un-set an
+   * override once one had been granted (see seats-handler.ts's
+   * updateSeatHandler, which sets this when an Admin sends
+   * `extra_permissions: []` to revert a worker to defaults).
+   */
+  clearPermissions?: boolean;
   workerTag?:   string;
 }
 
@@ -271,9 +328,11 @@ export async function syncUserMetadata(
     tenant_id:  tenantId,
     role,
     worker_tag: patch.workerTag ?? current.worker_tag ?? `${role}:${userId.slice(0, 8)}`,
-    ...(patch.permissions && patch.permissions.length > 0
-      ? { permissions: patch.permissions }
-      : current.permissions ? { permissions: current.permissions } : {}),
+    ...(patch.clearPermissions
+      ? {} // explicit revert-to-defaults — never fall back to current.permissions here
+      : patch.permissions && patch.permissions.length > 0
+        ? { permissions: patch.permissions }
+        : current.permissions ? { permissions: current.permissions } : {}),
   };
 
   const { error: updateErr } = await supabase.auth.admin.updateUserById(userId, {

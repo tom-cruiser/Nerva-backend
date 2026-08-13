@@ -2,7 +2,11 @@
 import { Client, LocalAuth, type Message } from 'whatsapp-web.js';
 import qrcode from 'qrcode';
 import path from 'path';
-import { redis } from '@retail/redis'; // Optional: for multi-instance support
+// NOTE: an unused `import { redis } from '@retail/redis'` used to live here,
+// left over from an unimplemented "multi-instance support" idea — sessions
+// are in-process-only today (see the in-memory session map below). Removed
+// rather than left as a dangling unused import; re-add if/when multi-instance
+// session sharing is actually built.
 
 // ============================================
 // Types & Interfaces

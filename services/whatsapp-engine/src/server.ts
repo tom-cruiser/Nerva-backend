@@ -1,7 +1,9 @@
 // services/whatsapp-engine/src/server.ts
 import { env } from '@retail/config';
 import { app } from './app';
-import { startCleanupInterval, stopCleanupInterval } from './lib/whatsapp-client';
+// NOTE: stopCleanupInterval() is called from app.ts's gracefulShutdown()
+// (registered there against SIGTERM/SIGINT), not here.
+import { startCleanupInterval } from './lib/whatsapp-client';
 
 const PORT = Number(env.PORT ?? 3005);
 

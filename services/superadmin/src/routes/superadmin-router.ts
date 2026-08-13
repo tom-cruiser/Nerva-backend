@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { getClient } from '@retail/db';
-import { redis } from '@retail/redis';
+import { redis, publishRealtimeEvent, tenantRoom } from '@retail/redis';
 import {
   requireSuperadmin,
   getTenantContext,
@@ -9,7 +9,7 @@ import {
   Errors,
   sendError,
   tenantStatusCacheKey,
-  TENANT_STATUS_CACHE_TTL_SECONDS,
+  setTenantStatusCache,
 } from '@retail/middleware';
 import { setTenantUsersBanned } from '../lib/supabase-admin';
 
@@ -28,7 +28,7 @@ interface TenantRow {
   billing_tier: string;
   currency: string;
   timezone: string;
-  status: 'ACTIVE' | 'SUSPENDED' | 'DELETED';
+  status: 'ACTIVE' | 'SUSPENDED' | 'DELETED' | 'PENDING_APPROVAL';
   status_reason: string | null;
   status_changed_at: string | null;
   is_active: boolean;
@@ -55,7 +55,7 @@ async function writePlatformAuditLog(
     tenantId: string;
     tenantSlug: string;
     tenantName: string;
-    action: 'SUSPEND' | 'UNBLOCK' | 'SOFT_DELETE' | 'PURGE' | 'TIER_CHANGE';
+    action: 'SUSPEND' | 'UNBLOCK' | 'SOFT_DELETE' | 'PURGE' | 'TIER_CHANGE' | 'APPROVE';
     reason?: string | null;
     performedBy: string;
     performedByEmail?: string;
@@ -75,19 +75,10 @@ async function writePlatformAuditLog(
   );
 }
 
-/** Write-through the tenant-status cache immediately — this, not TTL expiry,
- *  is what makes tenant-context.ts's rejection "immediate" cluster-wide. */
-async function setTenantStatusCache(tenantId: string, status: 'ACTIVE' | 'SUSPENDED' | 'DELETED'): Promise<void> {
-  try {
-    await redis.set(tenantStatusCacheKey(tenantId), status, 'EX', TENANT_STATUS_CACHE_TTL_SECONDS);
-  } catch (err) {
-    // Best-effort — the safety-net TTL on the read side, and the fact that a
-    // Postgres miss always re-checks Postgres, bound the blast radius of a
-    // failed cache write to at most TENANT_STATUS_CACHE_TTL_SECONDS of
-    // staleness, not an incorrect state forever.
-    console.error('[superadmin] Failed to write-through tenant status cache', (err as Error).message);
-  }
-}
+// setTenantStatusCache is now the canonical export from @retail/middleware
+// (promoted from a private copy that used to live here) — superadmin-router
+// and services/realtime's expiration cron both write through the same
+// implementation.
 
 async function fetchTenantOrNotFound(
   client: Awaited<ReturnType<typeof getClient>>,
@@ -116,7 +107,7 @@ router.get('/health-metrics', async (_req: Request, res: Response, next: NextFun
     const tenantsByStatus = await client.query<{ status: string; count: string }>(
       'SELECT status, COUNT(*) AS count FROM tenants GROUP BY status',
     );
-    const statusBreakdown: Record<string, number> = { ACTIVE: 0, SUSPENDED: 0, DELETED: 0 };
+    const statusBreakdown: Record<string, number> = { ACTIVE: 0, SUSPENDED: 0, DELETED: 0, PENDING_APPROVAL: 0 };
     for (const row of tenantsByStatus.rows) {
       statusBreakdown[row.status] = Number(row.count);
     }
@@ -289,6 +280,70 @@ router.post(
 
       await client.query('COMMIT');
       await setTenantStatusCache(tenant.id, 'SUSPENDED');
+      await publishRealtimeEvent(tenantRoom(tenant.id), 'tenant:status_changed', {
+        status: 'SUSPENDED', reason: parse.data.reason ?? null,
+      });
+
+      res.status(200).json({ tenant: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  },
+);
+
+/**
+ * Approves a self-registered tenant currently awaiting onboarding sign-off
+ * (see register-handler.ts, which lands new signups as PENDING_APPROVAL —
+ * migration 014_tenant_pending_approval.sql). Structurally mirrors /unblock
+ * below, with one deliberate difference: PENDING_APPROVAL tenants were never
+ * Supabase-banned (only /suspend and /delete ban), so there's nothing to
+ * unban here.
+ */
+router.post(
+  '/tenants/:tenantId/approve',
+  idempotent,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const ctx = getTenantContext(res);
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      const tenant = await fetchTenantOrNotFound(client, req.params.tenantId);
+      if (!tenant) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Tenant not found'));
+        return;
+      }
+      if (tenant.status !== 'PENDING_APPROVAL') {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.conflict(
+          `Tenant is ${tenant.status}, not PENDING_APPROVAL — nothing to approve`,
+        ));
+        return;
+      }
+
+      const updated = await client.query<TenantRow>(
+        `UPDATE tenants
+         SET status = 'ACTIVE', status_reason = NULL,
+             status_changed_at = NOW(), status_changed_by = $2
+         WHERE id = $1
+         RETURNING ${TENANT_LIST_COLUMNS}`,
+        [tenant.id, ctx.userId],
+      );
+
+      await writePlatformAuditLog(client, {
+        tenantId: tenant.id, tenantSlug: tenant.slug, tenantName: tenant.name,
+        action: 'APPROVE', performedBy: ctx.userId, performedByEmail: ctx.email,
+      });
+
+      await client.query('COMMIT');
+      await setTenantStatusCache(tenant.id, 'ACTIVE');
+      await publishRealtimeEvent(tenantRoom(tenant.id), 'tenant:status_changed', {
+        status: 'ACTIVE', reason: 'APPROVED',
+      });
 
       res.status(200).json({ tenant: updated.rows[0] });
     } catch (err) {
@@ -318,6 +373,13 @@ router.post(
       if (tenant.status === 'DELETED') {
         await client.query('ROLLBACK');
         sendError(res, Errors.conflict('Tenant is deleted — restore is not supported via unblock'));
+        return;
+      }
+      if (tenant.status === 'PENDING_APPROVAL') {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.conflict(
+          'Tenant is awaiting first-time approval — use POST /tenants/:id/approve, not unblock',
+        ));
         return;
       }
       if (tenant.status === 'ACTIVE') {
@@ -352,6 +414,9 @@ router.post(
 
       await client.query('COMMIT');
       await setTenantStatusCache(tenant.id, 'ACTIVE');
+      await publishRealtimeEvent(tenantRoom(tenant.id), 'tenant:status_changed', {
+        status: 'ACTIVE', reason: 'UNBLOCKED',
+      });
 
       res.status(200).json({ tenant: updated.rows[0] });
     } catch (err) {
@@ -507,6 +572,18 @@ const tierSchema = z.object({
   billing_tier: z.enum(['starter', 'premium', 'business', 'business_premium']),
 });
 
+/**
+ * Changes a tenant's plan. Writes ONLY to `subscriptions.plan_code` — never
+ * `tenants.billing_tier` directly — so `sync_tenant_billing_tier()` (migration
+ * 008) is the single trigger-driven path keeping the two in sync, and this
+ * route can never leave `subscriptions` stale the way an independent
+ * `UPDATE tenants SET billing_tier = ...` would. Functionally the same
+ * operation as subscriptions-router.ts's POST .../subscription/change-plan;
+ * this one stays under superadmin-router.ts (superadmin-only, no
+ * platform:billing) as the coarser "just set the tier" action, and records
+ * its own 'TIER_CHANGE' audit action rather than that route's 'PLAN_CHANGE'
+ * so the two entry points stay distinguishable in the audit trail.
+ */
 router.patch(
   '/tenants/:tenantId/tier',
   idempotent,
@@ -528,20 +605,51 @@ router.patch(
         return;
       }
 
-      const updated = await client.query<TenantRow>(
-        `UPDATE tenants SET billing_tier = $2 WHERE id = $1
-         RETURNING ${TENANT_LIST_COLUMNS}`,
+      const subResult = await client.query<{ id: string; plan_code: string }>(
+        `SELECT id, plan_code FROM subscriptions WHERE tenant_id = $1 FOR UPDATE`,
+        [tenant.id],
+      );
+      const sub = subResult.rows[0];
+      if (!sub) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound(
+          'This tenant has no subscription row to change the plan on (see POST /tenants/:id/subscription semantics) — cannot set a tier without one.',
+        ));
+        return;
+      }
+
+      if (sub.plan_code === parse.data.billing_tier) {
+        await client.query('ROLLBACK');
+        res.status(200).json({ tenant, already_on_tier: true });
+        return;
+      }
+
+      // Trigger sync_tenant_billing_tier() (migration 008) propagates this to
+      // tenants.billing_tier — never write that column directly here.
+      await client.query(
+        `UPDATE subscriptions SET plan_code = $2 WHERE tenant_id = $1`,
         [tenant.id, parse.data.billing_tier],
       );
+
+      await client.query(
+        `INSERT INTO billing_events (tenant_id, subscription_id, event_type, notes)
+         VALUES ($1, $2, 'PLAN_CHANGED', $3)`,
+        [
+          tenant.id, sub.id,
+          `Plan changed from ${sub.plan_code} to ${parse.data.billing_tier} by ${ctx.email} (tier route)`,
+        ],
+      );
+
+      const updated = await fetchTenantOrNotFound(client, tenant.id);
 
       await writePlatformAuditLog(client, {
         tenantId: tenant.id, tenantSlug: tenant.slug, tenantName: tenant.name,
         action: 'TIER_CHANGE', performedBy: ctx.userId, performedByEmail: ctx.email,
-        details: { previous_tier: tenant.billing_tier, new_tier: parse.data.billing_tier },
+        details: { previous_tier: sub.plan_code, new_tier: parse.data.billing_tier },
       });
 
       await client.query('COMMIT');
-      res.status(200).json({ tenant: updated.rows[0] });
+      res.status(200).json({ tenant: updated });
     } catch (err) {
       await client.query('ROLLBACK');
       next(err);

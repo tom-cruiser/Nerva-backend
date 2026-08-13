@@ -47,6 +47,10 @@ export const Errors = {
   // "you're not allowed" apart from "your whole account is suspended".
   locked:         (msg = 'This resource is locked',
                    d: Record<string, unknown> = {})  => new ApiError(msg, 'LOCKED', 423, d),
+  // The tenant's plan/feature-flag config does not grant this feature — see
+  // resolveFeatureFlag()/requireFeatureFlag() in feature-flags.ts.
+  featureDisabled: (msg = 'This feature is not enabled for your plan',
+                    d: Record<string, unknown> = {}) => new ApiError(msg, 'FEATURE_NOT_ENABLED', 403, d),
   internal:       (msg = 'Internal server error')    => new ApiError(msg, 'INTERNAL_ERROR', 500),
 };
 

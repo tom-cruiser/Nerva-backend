@@ -74,14 +74,22 @@ export async function findUserById(
 }
 
 /**
- * Confirm a tenant exists and is active.
- * Called before credential check — no user context available yet.
+ * Confirm a tenant exists and is usable for provisioning.
+ * Called by user-provisioning.ts::provisionUser() right after a tenant row is
+ * created/looked up — no user context available yet.
+ *
+ * Deliberately allows PENDING_APPROVAL alongside ACTIVE (not just
+ * `is_active = TRUE`): a freshly self-registered tenant defaults to
+ * PENDING_APPROVAL (see register-handler.ts) and its owner/seats must still
+ * be provisionable while awaiting superadmin approval — only SUSPENDED/
+ * DELETED tenants (both `is_active = FALSE`, same as PENDING_APPROVAL) should
+ * block provisioning.
  */
 export async function findTenantById(tenantId: string): Promise<TenantRow | null> {
   const result = await query<TenantRow>(
     `SELECT id, name, slug, is_active
      FROM tenants
-     WHERE id = $1 AND is_active = TRUE
+     WHERE id = $1 AND status IN ('ACTIVE', 'PENDING_APPROVAL')
      LIMIT 1`,
     [tenantId],
   );

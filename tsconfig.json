@@ -5,6 +5,7 @@
     { "path": "packages/config" },
     { "path": "packages/db" },
     { "path": "packages/redis" },
+    { "path": "packages/supabase-admin" },
     { "path": "packages/middleware" },
     { "path": "services/auth-tenant" },
     { "path": "services/inventory" },
@@ -12,6 +13,7 @@
     { "path": "services/ledger-payments" },
     { "path": "services/whatsapp-engine" },
     { "path": "services/shifts" },
-    { "path": "services/superadmin" }
+    { "path": "services/superadmin" },
+    { "path": "services/realtime" }
   ]
 }

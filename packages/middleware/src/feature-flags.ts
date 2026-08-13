@@ -1,4 +1,7 @@
+import { Request, Response, NextFunction } from 'express';
 import { getClient } from '@retail/db';
+import { Errors, sendError } from './api-error';
+import { getTenantContext } from './tenant-context';
 
 /**
  * Feature-flag + resource-limit resolution  (see packages/db/src/migrations/
@@ -56,6 +59,49 @@ export async function resolveFeatureFlag(tenantId: string, flagKey: string): Pro
   } finally {
     client.release();
   }
+}
+
+/**
+ * Gate a route behind a feature flag. MUST be mounted AFTER
+ * tenantContextMiddleware (needs `getTenantContext(res)`).
+ *
+ * Unlike resolveTenantStatus() (which fails OPEN on a Redis/DB error, because
+ * it's an availability check that shouldn't take the whole platform down on
+ * an infra blip), this fails CLOSED — a feature-flag check is an entitlement
+ * gate, and silently granting a paid feature because a DB query errored is
+ * the wrong failure mode.
+ *
+ * Usage:
+ *   router.post('/send-report', requireFeatureFlag('whatsapp_reporting'), handler);
+ */
+export function requireFeatureFlag(flagKey: string) {
+  return async function requireFeatureFlagMiddleware(
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    let ctx: ReturnType<typeof getTenantContext>;
+    try {
+      ctx = getTenantContext(res);
+    } catch {
+      sendError(res, Errors.internal('requireFeatureFlag called before tenantContextMiddleware'));
+      return;
+    }
+
+    try {
+      const enabled = await resolveFeatureFlag(ctx.tenantId, flagKey);
+      if (!enabled) {
+        sendError(
+          res,
+          Errors.featureDisabled(`Feature "${flagKey}" is not enabled for this tenant's plan`, { flagKey }),
+        );
+        return;
+      }
+      next();
+    } catch (err) {
+      next(err);
+    }
+  };
 }
 
 // ─── Resource limits ──────────────────────────────────────────────────────────

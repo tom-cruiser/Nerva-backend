@@ -11,6 +11,7 @@
     { "path": "../../packages/config" },
     { "path": "../../packages/db" },
     { "path": "../../packages/redis" },
+    { "path": "../../packages/supabase-admin" },
     { "path": "../../packages/middleware" },
     { "path": "../../packages/types" }
   ],

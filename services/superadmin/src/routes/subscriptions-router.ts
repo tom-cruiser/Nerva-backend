@@ -1,13 +1,15 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { getClient } from '@retail/db';
-import { redis } from '@retail/redis';
+import { redis, publishRealtimeEvent, tenantRoom, PLATFORM_STAFF_ROOM } from '@retail/redis';
+import { setTenantUsersBanned } from '@retail/supabase-admin';
 import {
   getTenantContext,
   idempotency,
   Errors,
   sendError,
   requireAnyPermission,
+  setTenantStatusCache,
   PLATFORM_SENTINEL_TENANT_ID,
 } from '@retail/middleware';
 
@@ -99,7 +101,8 @@ async function writePlatformAuditLog(
     tenantSlug: string;
     tenantName: string;
     action: 'PLAN_EDIT' | 'PLAN_CHANGE' | 'SUB_CANCEL' | 'SUB_REACTIVATE'
-          | 'FEATURE_FLAG_SET' | 'FEATURE_FLAG_RESET';
+          | 'FEATURE_FLAG_SET' | 'FEATURE_FLAG_RESET'
+          | 'SUB_REQUEST_APPROVE' | 'SUB_REQUEST_REJECT';
     reason?: string | null;
     performedBy: string;
     performedByEmail?: string;
@@ -328,6 +331,7 @@ router.post(
       });
 
       await client.query('COMMIT');
+      await publishRealtimeEvent(tenantRoom(tenant.id), 'subscription:updated', { subscription: updated.rows[0] });
       res.status(200).json({ subscription: updated.rows[0] });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -413,6 +417,7 @@ router.post(
       });
 
       await client.query('COMMIT');
+      await publishRealtimeEvent(tenantRoom(tenant.id), 'subscription:updated', { subscription: updated.rows[0] });
       res.status(200).json({ subscription: updated.rows[0] });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -481,6 +486,7 @@ router.post(
       });
 
       await client.query('COMMIT');
+      await publishRealtimeEvent(tenantRoom(tenant.id), 'subscription:updated', { subscription: updated.rows[0] });
       res.status(200).json({ subscription: updated.rows[0] });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -507,6 +513,293 @@ router.get(
       );
       res.json({ events: result.rows, timestamp: new Date().toISOString() });
     } catch (err) {
+      next(err);
+    } finally {
+      client.release();
+    }
+  },
+);
+
+// ─── Subscription upgrade requests ─────────────────────────────────────────────
+//
+// The other direction from change-plan above: a Shop Admin requests a plan/
+// billing-cycle upgrade (services/auth-tenant's POST /api/v1/auth/
+// subscription/request) and a Super Admin approves or declines it here.
+// Approval writes through to `subscriptions` exactly like change-plan does —
+// this table only tracks the request/decision lifecycle around that write.
+
+interface SubscriptionRequestRow {
+  id:                  string;
+  tenant_id:           string;
+  requested_plan_code: PlanCode;
+  billing_cycle:       'monthly' | 'semestral' | 'annual';
+  status:              'PENDING' | 'APPROVED' | 'REJECTED';
+  requested_by:        string;
+  decided_by:          string | null;
+  decided_at:          string | null;
+  decision_reason:     string | null;
+  created_at:          string;
+  updated_at:          string;
+}
+
+const REQUEST_STATUSES = ['PENDING', 'APPROVED', 'REJECTED'] as const;
+
+/** Computes a period end from the chosen billing cycle — 30/180/365 days —
+ *  used unless the approver supplies an explicit `custom_end_date`. */
+function periodEndFromCycle(cycle: SubscriptionRequestRow['billing_cycle'], start: Date): Date {
+  const days = cycle === 'monthly' ? 30 : cycle === 'semestral' ? 180 : 365;
+  return new Date(start.getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+router.get(
+  '/subscription-requests',
+  requireRead,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const client = await getClient();
+    try {
+      const statusParam = typeof req.query['status'] === 'string' ? req.query['status'].toUpperCase() : undefined;
+      const filterStatus = (REQUEST_STATUSES as readonly string[]).includes(statusParam ?? '') ? statusParam : undefined;
+
+      const result = await client.query(
+        `SELECT sr.id, sr.tenant_id, sr.requested_plan_code, sr.billing_cycle, sr.status,
+                sr.requested_by, sr.decided_by, sr.decided_at, sr.decision_reason,
+                sr.created_at, sr.updated_at,
+                t.name AS tenant_name, t.slug AS tenant_slug,
+                u.email AS requested_by_email
+         FROM subscription_requests sr
+         JOIN tenants t ON t.id = sr.tenant_id
+         LEFT JOIN users u ON u.id = sr.requested_by
+         ${filterStatus ? 'WHERE sr.status = $1' : ''}
+         ORDER BY sr.created_at DESC
+         LIMIT 100`,
+        filterStatus ? [filterStatus] : [],
+      );
+      res.json({ requests: result.rows, timestamp: new Date().toISOString() });
+    } catch (err) {
+      next(err);
+    } finally {
+      client.release();
+    }
+  },
+);
+
+const approveRequestSchema = z.object({
+  custom_end_date: z.string().datetime().optional(),
+  reason:          z.string().trim().max(1000).optional(),
+});
+
+router.post(
+  '/subscription-requests/:id/approve',
+  requireWrite,
+  idempotent,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const parse = approveRequestSchema.safeParse(req.body ?? {});
+    if (!parse.success) {
+      sendError(res, Errors.invalidRequest(parse.error.issues.map((i) => i.message).join('; ')));
+      return;
+    }
+    const ctx = getTenantContext(res);
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      const requestResult = await client.query<SubscriptionRequestRow>(
+        `SELECT * FROM subscription_requests WHERE id = $1 FOR UPDATE`,
+        [req.params.id],
+      );
+      if (requestResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Subscription request not found'));
+        return;
+      }
+      const request = requestResult.rows[0];
+
+      if (request.status !== 'PENDING') {
+        // Idempotent at the domain level — a retried/duplicate approval
+        // click on an already-decided request is a no-op, not an error.
+        await client.query('ROLLBACK');
+        res.status(200).json({ request, already_decided: true });
+        return;
+      }
+
+      const tenantStatusResult = await client.query<{ status: string }>(
+        `SELECT status FROM tenants WHERE id = $1 FOR UPDATE`,
+        [request.tenant_id],
+      );
+      if (tenantStatusResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Tenant not found'));
+        return;
+      }
+      const previousTenantStatus = tenantStatusResult.rows[0].status;
+
+      const subResult = await client.query<SubscriptionRow>(
+        `SELECT * FROM subscriptions WHERE tenant_id = $1 FOR UPDATE`,
+        [request.tenant_id],
+      );
+      if (subResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Subscription not found for this tenant'));
+        return;
+      }
+      const sub = subResult.rows[0];
+
+      const periodStart = new Date();
+      const periodEnd = parse.data.custom_end_date
+        ? new Date(parse.data.custom_end_date)
+        : periodEndFromCycle(request.billing_cycle, periodStart);
+      if (periodEnd.getTime() <= periodStart.getTime()) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.invalidRequest('custom_end_date must be in the future'));
+        return;
+      }
+
+      // The trigger sync_tenant_billing_tier() keeps tenants.billing_tier in
+      // sync with this write — never write billing_tier directly.
+      const updatedSub = await client.query<SubscriptionRow>(
+        `UPDATE subscriptions
+         SET plan_code = $2, billing_cycle = $3, status = 'ACTIVE',
+             current_period_start = $4, current_period_end = $5,
+             cancel_at_period_end = FALSE, canceled_at = NULL
+         WHERE tenant_id = $1
+         RETURNING *`,
+        [request.tenant_id, request.requested_plan_code, request.billing_cycle,
+         periodStart.toISOString(), periodEnd.toISOString()],
+      );
+
+      // Approving an upgrade also lifts a suspension/pending-approval state —
+      // mirrors the existing /unblock handler's shape exactly (unban users,
+      // flip status to ACTIVE).
+      let tenantReactivated = false;
+      if (previousTenantStatus !== 'ACTIVE') {
+        const usersResult = await client.query<{ id: string }>(
+          'SELECT id FROM users WHERE tenant_id = $1 AND deleted_at IS NULL',
+          [request.tenant_id],
+        );
+        await setTenantUsersBanned(usersResult.rows.map((u) => u.id), false);
+        await client.query(
+          `UPDATE tenants
+           SET status = 'ACTIVE', status_reason = NULL, status_changed_at = NOW(), status_changed_by = $2
+           WHERE id = $1`,
+          [request.tenant_id, ctx.userId],
+        );
+        tenantReactivated = true;
+      }
+
+      await client.query(
+        `UPDATE subscription_requests
+         SET status = 'APPROVED', decided_by = $2, decided_at = NOW(), decision_reason = $3
+         WHERE id = $1`,
+        [request.id, ctx.userId, parse.data.reason ?? null],
+      );
+
+      await client.query(
+        `INSERT INTO billing_events (tenant_id, subscription_id, event_type, notes)
+         VALUES ($1, $2, 'SUBSCRIPTION_APPROVED', $3)`,
+        [
+          request.tenant_id, sub.id,
+          `Upgrade request approved: ${sub.plan_code} -> ${request.requested_plan_code} (${request.billing_cycle}) by ${ctx.email}`,
+        ],
+      );
+
+      const tenantMeta = await fetchTenantMeta(client, request.tenant_id);
+      await writePlatformAuditLog(client, {
+        tenantId: request.tenant_id, tenantSlug: tenantMeta?.slug ?? '', tenantName: tenantMeta?.name ?? '',
+        action: 'SUB_REQUEST_APPROVE', reason: parse.data.reason, performedBy: ctx.userId, performedByEmail: ctx.email,
+        details: {
+          requested_plan: request.requested_plan_code, billing_cycle: request.billing_cycle,
+          previous_plan: sub.plan_code, tenant_reactivated: tenantReactivated,
+        },
+      });
+
+      await client.query('COMMIT');
+
+      if (tenantReactivated) {
+        await setTenantStatusCache(request.tenant_id, 'ACTIVE');
+      }
+      await publishRealtimeEvent(tenantRoom(request.tenant_id), 'subscription:updated', { subscription: updatedSub.rows[0] });
+      if (tenantReactivated) {
+        await publishRealtimeEvent(tenantRoom(request.tenant_id), 'tenant:status_changed', {
+          status: 'ACTIVE', reason: 'SUBSCRIPTION_APPROVED',
+        });
+      }
+      await publishRealtimeEvent(PLATFORM_STAFF_ROOM, 'subscription:request_decided', {
+        requestId: request.id, status: 'APPROVED',
+      });
+
+      res.status(200).json({ subscription: updatedSub.rows[0], tenant_reactivated: tenantReactivated });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  },
+);
+
+const rejectRequestSchema = z.object({
+  reason: z.string().trim().min(1, 'A reason is required when declining a request').max(1000),
+});
+
+router.post(
+  '/subscription-requests/:id/reject',
+  requireWrite,
+  idempotent,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const parse = rejectRequestSchema.safeParse(req.body);
+    if (!parse.success) {
+      sendError(res, Errors.invalidRequest(parse.error.issues.map((i) => i.message).join('; ')));
+      return;
+    }
+    const ctx = getTenantContext(res);
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      const requestResult = await client.query<SubscriptionRequestRow>(
+        `SELECT * FROM subscription_requests WHERE id = $1 FOR UPDATE`,
+        [req.params.id],
+      );
+      if (requestResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Subscription request not found'));
+        return;
+      }
+      const request = requestResult.rows[0];
+
+      if (request.status !== 'PENDING') {
+        await client.query('ROLLBACK');
+        res.status(200).json({ request, already_decided: true });
+        return;
+      }
+
+      const updated = await client.query<SubscriptionRequestRow>(
+        `UPDATE subscription_requests
+         SET status = 'REJECTED', decided_by = $2, decided_at = NOW(), decision_reason = $3
+         WHERE id = $1
+         RETURNING *`,
+        [request.id, ctx.userId, parse.data.reason],
+      );
+
+      const tenantMeta = await fetchTenantMeta(client, request.tenant_id);
+      await writePlatformAuditLog(client, {
+        tenantId: request.tenant_id, tenantSlug: tenantMeta?.slug ?? '', tenantName: tenantMeta?.name ?? '',
+        action: 'SUB_REQUEST_REJECT', reason: parse.data.reason, performedBy: ctx.userId, performedByEmail: ctx.email,
+        details: { requested_plan: request.requested_plan_code, billing_cycle: request.billing_cycle },
+      });
+
+      await client.query('COMMIT');
+
+      await publishRealtimeEvent(tenantRoom(request.tenant_id), 'subscription:request_rejected', {
+        requestId: request.id, reason: parse.data.reason,
+      });
+      await publishRealtimeEvent(PLATFORM_STAFF_ROOM, 'subscription:request_decided', {
+        requestId: request.id, status: 'REJECTED',
+      });
+
+      res.status(200).json({ request: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
       next(err);
     } finally {
       client.release();

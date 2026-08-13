@@ -1,2 +1,3 @@
-2026/08/12-13:40:33.584 1f3d9 Creating DB /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/Sync Data/LevelDB since it was missing.
-2026/08/12-13:40:33.608 1f3d9 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/Sync Data/LevelDB/MANIFEST-000001
+2026/08/13-13:44:55.025 1fe54 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/Sync Data/LevelDB/MANIFEST-000001
+2026/08/13-13:44:55.026 1fe54 Recovering log #3
+2026/08/13-13:44:55.026 1fe54 Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-6b36ad0d-bbea-40aa-97f9-c18c6d572f8f/Default/Sync Data/LevelDB/000003.log 

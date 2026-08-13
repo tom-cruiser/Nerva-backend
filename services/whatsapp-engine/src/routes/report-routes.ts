@@ -1,12 +1,19 @@
 // services/whatsapp-engine/src/routes/report-routes.ts
 import { Router } from 'express';
 import { sendPOSReport, POSReportData } from '../lib/report-service';
-import { getTenantContext, Errors, ApiError } from '@retail/middleware';
+import { getTenantContext, Errors, ApiError, requireFeatureFlag } from '@retail/middleware';
 
 const reportRouter = Router();
 
+// Automated WhatsApp reporting is a paid-tier feature (see packages/db's
+// 008_subscriptions_and_features.sql `whatsapp_reporting` flag, seeded for
+// business/business_premium plans in 013_seed_whatsapp_reporting_flag.sql).
+// Gate the two mutating "send it" endpoints; leave the read-only template
+// list ungated since it's static metadata, not an actual send.
+const requireWhatsappReporting = requireFeatureFlag('whatsapp_reporting');
+
 // POST /send-report - Send POS report
-reportRouter.post('/send-report', async (req, res, next) => {
+reportRouter.post('/send-report', requireWhatsappReporting, async (req, res, next) => {
   let ctx;
   try {
     ctx = getTenantContext(res);
@@ -60,7 +67,7 @@ reportRouter.post('/send-report', async (req, res, next) => {
 });
 
 // POST /schedule-report - Schedule recurring reports
-reportRouter.post('/schedule-report', async (req, res, next) => {
+reportRouter.post('/schedule-report', requireWhatsappReporting, async (req, res, next) => {
   let ctx;
   try {
     ctx = getTenantContext(res);
@@ -111,7 +118,7 @@ reportRouter.post('/schedule-report', async (req, res, next) => {
 });
 
 // GET /report-templates - Get report templates
-reportRouter.get('/report-templates', async (req, res) => {
+reportRouter.get('/report-templates', async (_req, res) => {
   // Return available report templates
   res.json({
     templates: [

@@ -80,14 +80,14 @@ webhookRouter.post('/incoming', async (req, res) => {
     // - Auto-reply if configured
     // - Trigger business workflows
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Webhook processed',
       timestamp: new Date().toISOString()
     });
   } catch (err: any) {
     console.error('[webhook] Incoming error:', err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: err.message || 'Failed to process incoming message'
     });
@@ -126,13 +126,13 @@ webhookRouter.post('/status', async (req, res) => {
       }
     });
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       timestamp: new Date().toISOString()
     });
   } catch (err: any) {
     console.error('[webhook] Status error:', err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: err.message || 'Failed to process status update'
     });
@@ -172,13 +172,13 @@ webhookRouter.post('/session', async (req, res) => {
     // Notify connected clients via WebSocket if needed
     // This could trigger a real-time UI update
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       timestamp: new Date().toISOString()
     });
   } catch (err: any) {
     console.error('[webhook] Session error:', err);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: err.message || 'Failed to process session update'
     });
@@ -221,7 +221,7 @@ webhookRouter.get('/events', tenantContextMiddleware, requireSuperadmin(), async
 /**
  * DELETE /events - Clear webhook events for a tenant
  */
-webhookRouter.delete('/events', async (req, res) => {
+webhookRouter.delete('/events', async (_req, res) => {
   try {
     const ctx = getTenantContext(res);
     const tenantId = ctx.tenantId;

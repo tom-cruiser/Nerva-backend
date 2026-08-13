@@ -8,11 +8,12 @@
     "grant-superadmin": "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config scripts/grant-superadmin.ts"
   },
   "dependencies": {
-    "@retail/config":     "*",
-    "@retail/db":         "*",
-    "@retail/middleware": "*",
-    "@retail/redis":      "*",
-    "@retail/types":      "*",
+    "@retail/config":         "*",
+    "@retail/db":             "*",
+    "@retail/middleware":     "*",
+    "@retail/redis":          "*",
+    "@retail/supabase-admin": "*",
+    "@retail/types":          "*",
     "@supabase/supabase-js": "^2.110.3",
     "express":            "^4.19.2",
     "helmet":             "^7.1.0",

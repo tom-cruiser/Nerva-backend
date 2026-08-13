@@ -1,19 +1,20 @@
 import { Router }       from 'express';
 import { rateLimit, tenantContextMiddleware, requirePermission, idempotency } from '@retail/middleware';
 import { redis }        from '@retail/redis';
-import { loginHandler }      from '../handlers/login-handler';
-import { refreshHandler }    from '../handlers/refresh-handler';
-import { logoutHandler, logoutAllHandler } from '../handlers/logout-handler';
 import { registerHandler }   from '../handlers/register-handler';
-import { listSeatsHandler, createSeatHandler } from '../handlers/seats-handler';
+import {
+  listSeatsHandler,
+  createSeatHandler,
+  updateSeatHandler,
+  deactivateSeatHandler,
+  resetSeatPasswordHandler,
+} from '../handlers/seats-handler';
+import {
+  getSubscriptionHandler,
+  requestSubscriptionUpgradeHandler,
+} from '../handlers/subscription-handler';
 
 const authRouter = Router();
-
-/**
- * IP-based rate limit for login — 10 attempts per 60 s.
- * Sits above the DB-level 5-failure lockout as a first defence layer.
- */
-const loginRateLimit = rateLimit(redis, { max: 10, windowSeconds: 60 });
 
 /**
  * IP-based rate limit for registration — 5 workspaces per 10 min per IP.
@@ -24,43 +25,21 @@ const registerRateLimit = rateLimit(redis, { max: 5, windowSeconds: 600 });
  * POST /api/v1/auth/register
  * Creates a tenant + provisions the OWNER (Supabase auth user + users row).
  * No auth. Owner then signs in through Supabase.
+ *
+ * NOTE: this service used to also expose /login, /refresh, /logout, and
+ * /logout-all backed by a custom RS256 signer (crypto-service.ts). That path
+ * minted tokens with a different issuer/audience than the Supabase-JWKS
+ * tokens every other service (and tenant-context.ts) actually verifies — a
+ * token from that /login could never be used anywhere else in the cluster.
+ * The real, working auth path has always been the frontend calling Supabase's
+ * signInWithPassword() directly (see app/context/AuthContext.tsx). Those four
+ * dead routes/handlers (and crypto-service.ts, token-service.ts, and
+ * refresh-token-repository.ts, which existed only to support them) have been
+ * removed. Session revocation on tenant suspension is unaffected — it never
+ * depended on this: see tenant-context.ts's per-request status gate and
+ * services/superadmin's Supabase-ban-based kill-sessions.
  */
 authRouter.post('/register', registerRateLimit, registerHandler);
-
-/**
- * POST /api/v1/auth/login
- * Headers: X-Tenant-Id (required)
- * Body:    LoginRequest
- * Returns: LoginResponse (RS256 access + refresh tokens, full user + permissions)
- *
- * NOTE: this route does NOT run the shared `idempotency()` middleware — it
- * requires a resolved TenantContext (from a verified Supabase JWT), which
- * doesn't exist yet at login. login-handler never reads X-Client-Mutation-Id
- * either. That's acceptable here because a retried login is naturally
- * idempotent (it just re-authenticates; it doesn't create duplicate state)
- * — unlike /seats below, which provisions a new row per call and does need
- * the guard.
- */
-authRouter.post('/login', loginRateLimit, loginHandler);
-
-/**
- * POST /api/v1/auth/refresh
- * Body: RefreshTokenRequest  -OR-  Cookie: refresh_token
- * Returns: RefreshTokenResponse (new access token)
- */
-authRouter.post('/refresh', refreshHandler);
-
-/**
- * POST /api/v1/auth/logout
- * Revokes the provided refresh token JTI in the DB.
- */
-authRouter.post('/logout', logoutHandler);
-
-/**
- * POST /api/v1/auth/logout-all
- * Revokes ALL active refresh tokens for the authenticated user.
- */
-authRouter.post('/logout-all', logoutAllHandler);
 
 /**
  * GET  /api/v1/auth/seats
@@ -86,6 +65,64 @@ authRouter.post(
   requirePermission('users:create'),
   idempotency(redis),
   createSeatHandler,
+);
+
+/**
+ * PATCH /api/v1/auth/seats/:id — update a worker's role and/or active status.
+ * Requires: users:update (OWNER only)
+ *
+ * DELETE /api/v1/auth/seats/:id — deactivate ("block") a worker seat.
+ * Requires: users:delete (OWNER only)
+ *
+ * POST /api/v1/auth/seats/:id/reset-password — reset a worker's password.
+ * Requires: users:update (OWNER only)
+ *
+ * All three are tenant-scoped (see seats-handler.ts's findTenantSeat) and
+ * reject targeting the tenant's own OWNER — these manage subordinate
+ * MANAGER/STAFF seats only, the same set createSeatHandler can provision.
+ */
+authRouter.patch(
+  '/seats/:id',
+  tenantContextMiddleware,
+  requirePermission('users:update'),
+  idempotency(redis),
+  updateSeatHandler,
+);
+
+authRouter.delete(
+  '/seats/:id',
+  tenantContextMiddleware,
+  requirePermission('users:delete'),
+  deactivateSeatHandler,
+);
+
+authRouter.post(
+  '/seats/:id/reset-password',
+  tenantContextMiddleware,
+  requirePermission('users:update'),
+  idempotency(redis),
+  resetSeatPasswordHandler,
+);
+
+/**
+ * GET  /api/v1/auth/subscription — current plan/limits/trial days remaining
+ *   for the authenticated tenant, plus its latest pending upgrade request.
+ * POST /api/v1/auth/subscription/request — queue a plan/billing-cycle
+ *   upgrade request for Super Admin review.
+ * Both OWNER-only (checked inline in subscription-handler.ts — billing has
+ * no dedicated permission type, same territory as seats management).
+ */
+authRouter.get(
+  '/subscription',
+  tenantContextMiddleware,
+  getSubscriptionHandler,
+);
+
+authRouter.post(
+  '/subscription/request',
+  tenantContextMiddleware,
+  idempotency(redis),
+  requestSubscriptionUpgradeHandler,
 );
 
 export { authRouter };

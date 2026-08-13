@@ -12,6 +12,11 @@ export type ErrorCode =
   | 'SERVICE_UNAVAILABLE'
   | 'LOCKED'
   | 'INTERNAL_ERROR'
+  // Entitlement gate: the tenant's plan/feature-flag config does not include
+  // the requested feature. Distinct from FORBIDDEN (a role/permission check)
+  // so a client can tell "you're the wrong role" apart from "your plan
+  // doesn't include this" — see requireFeatureFlag() in @retail/middleware.
+  | 'FEATURE_NOT_ENABLED'
   // ── whatsapp-engine operation-specific variants ──────────────────────────
   // Distinct from INTERNAL_ERROR so a client can tell which WhatsApp
   // operation failed (connect vs. send vs. admin op, etc.) without parsing

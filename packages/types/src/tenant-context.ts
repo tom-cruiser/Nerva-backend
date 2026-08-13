@@ -77,11 +77,15 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     'whatsapp:send',
     'shifts:read', 'shifts:manage',
   ],
+  // STAFF (cashier/shift worker) deliberately excludes 'ledger:read' and
+  // 'reports:read' — per admin3.md's Worker Permission & Tenant Isolation
+  // Guardrails, a cashier must not see the customer debt book / overall
+  // ledger balances or profit/sales-report data. Neither is needed for POS
+  // checkout (sales:create) or shift open/close/reconcile (shifts:*), which
+  // is why removing them has no functional impact on either flow.
   STAFF: [
     'inventory:read',
     'sales:read', 'sales:create',
-    'ledger:read',
-    'reports:read',
     'shifts:read', 'shifts:manage',
   ],
   VIEWER: [
