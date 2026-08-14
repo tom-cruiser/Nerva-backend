@@ -20,10 +20,19 @@ export async function createPOSReportPDF(
   
   let y = height - 50;
 
-  // Helper to draw text
+  // Helper to draw text. pdf-lib's StandardFonts use WinAnsi encoding,
+  // which cannot render emoji or most non-Latin-1 characters — a genuine
+  // bug (confirmed live: "WinAnsi cannot encode ..." throws and aborts PDF
+  // generation entirely) that this file's own hardcoded emoji headers were
+  // hitting on every single call before this fix, previously masked only
+  // because report-service.ts's caller swallows PDF-generation errors and
+  // silently continues without an attachment. Sanitizing here — not just
+  // removing the emoji from the templates below — also protects against
+  // the same crash from real user data (a product/category name typed with
+  // an emoji or other non-WinAnsi character).
   const drawText = (text: string, fontSize: number = 12, isBold: boolean = false, indent: number = 50) => {
     const f = isBold ? fontBold : font;
-    page.drawText(text, {
+    page.drawText(safeText(text), {
       x: indent,
       y: y,
       size: fontSize,
@@ -34,14 +43,14 @@ export async function createPOSReportPDF(
   };
 
   // Header
-  drawText(`📊 ${period.toUpperCase()} REPORT`, 20, true);
+  drawText(`${period.toUpperCase()} REPORT`, 20, true);
   drawText(`Tenant: ${tenantId}`, 12);
   drawText(`Date: ${formatDate(date)}`, 12);
   y -= 10;
 
   // Summary
-  drawText('━━━━━━━━━━━━━━━━━━━━', 12);
-  drawText('📈 SALES SUMMARY', 14, true);
+  drawText('--------------------', 12);
+  drawText('SALES SUMMARY', 14, true);
   y -= 5;
   drawText(`Total Sales: $${formatCurrency(summary.totalSales)}`, 12);
   drawText(`Total Orders: ${summary.totalOrders}`, 12);
@@ -49,8 +58,8 @@ export async function createPOSReportPDF(
   y -= 10;
 
   // Top Products
-  drawText('━━━━━━━━━━━━━━━━━━━━', 12);
-  drawText('🏆 TOP SELLING PRODUCTS', 14, true);
+  drawText('--------------------', 12);
+  drawText('TOP SELLING PRODUCTS', 14, true);
   y -= 5;
   summary.topSellingProducts.slice(0, 10).forEach((product, i) => {
     drawText(`${i + 1}. ${product.name}`, 12);
@@ -60,8 +69,8 @@ export async function createPOSReportPDF(
   y -= 10;
 
   // Categories
-  drawText('━━━━━━━━━━━━━━━━━━━━', 12);
-  drawText('📂 REVENUE BY CATEGORY', 14, true);
+  drawText('--------------------', 12);
+  drawText('REVENUE BY CATEGORY', 14, true);
   y -= 5;
   summary.revenueByCategory.forEach(category => {
     const percentage = (category.revenue / summary.totalSales) * 100;
@@ -70,8 +79,8 @@ export async function createPOSReportPDF(
   y -= 10;
 
   // Payment Methods
-  drawText('━━━━━━━━━━━━━━━━━━━━', 12);
-  drawText('💳 PAYMENT METHODS', 14, true);
+  drawText('--------------------', 12);
+  drawText('PAYMENT METHODS', 14, true);
   y -= 5;
   summary.paymentMethods.forEach(method => {
     const percentage = (method.amount / summary.totalSales) * 100;
@@ -81,10 +90,22 @@ export async function createPOSReportPDF(
   // Footer
   y = 50;
   drawText(`Generated at: ${new Date().toLocaleString()}`, 10);
-  drawText('📱 Powered by Nerva POS', 10);
+  drawText('Powered by Nerva POS', 10);
 
   const pdfBytes = await pdfDoc.save();
   return Buffer.from(pdfBytes);
+}
+
+/**
+ * Strips characters pdf-lib's WinAnsi-encoded StandardFonts can't render
+ * (emoji, most non-Latin-1 script) rather than letting one bad character
+ * (from this file's own templates, or from real user-entered data) throw
+ * and abort PDF generation entirely.
+ */
+function safeText(text: string): string {
+  return Array.from(text)
+    .filter((ch) => (ch.codePointAt(0) ?? 0) <= 0xff)
+    .join('');
 }
 
 function formatDate(date: string): string {

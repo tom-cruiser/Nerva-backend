@@ -423,9 +423,35 @@ async function tryResolveLidJid(client: Client, chatId: string): Promise<string 
 // Send Message
 // ============================================
 
+/**
+ * Resolves a raw phone number (or an already-`@`-suffixed chatId) to the
+ * WhatsApp chatId `sendMessage()` actually needs — the same lookup
+ * `sendMessageFrom` does internally, exposed standalone for callers that
+ * need to send a SECOND thing (e.g. a PDF attachment) to the same
+ * recipient without re-deriving it. Genuinely necessary: passing a raw
+ * phone number straight to `client.sendMessage()` fails for LID-based
+ * contacts (`...@lid`, not `...@c.us`) — confirmed live, this is exactly
+ * why `report-dispatch.ts`'s PDF-attachment step was failing 100% of the
+ * time while the text message (which does go through this resolution)
+ * sent successfully.
+ */
+export async function resolveChatId(tenantId: string, number: string): Promise<string> {
+  const state = sessions.get(tenantId);
+  if (!state || state.status !== 'READY') {
+    throw new Error('WhatsApp session not ready');
+  }
+  if (number.includes('@')) return number;
+  const cleaned = number.replace(/\D/g, '');
+  const numberId = await state.client.getNumberId(cleaned);
+  if (!numberId) {
+    throw new Error(`The number ${cleaned} is not registered on WhatsApp.`);
+  }
+  return numberId._serialized;
+}
+
 export async function sendMessageFrom(
-  tenantId: string, 
-  number: string, 
+  tenantId: string,
+  number: string,
   message: string
 ): Promise<any> {
   const state = sessions.get(tenantId);

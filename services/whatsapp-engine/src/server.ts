@@ -1,9 +1,11 @@
 // services/whatsapp-engine/src/server.ts
+import * as cron from 'node-cron';
 import { env } from '@retail/config';
 import { app } from './app';
 // NOTE: stopCleanupInterval() is called from app.ts's gracefulShutdown()
 // (registered there against SIGTERM/SIGINT), not here.
 import { startCleanupInterval } from './lib/whatsapp-client';
+import { runScheduledReportDispatch } from './jobs/report-dispatch';
 
 const PORT = Number(env.PORT ?? 3005);
 
@@ -13,6 +15,22 @@ const PORT = Number(env.PORT ?? 3005);
 
 // Clean up stale sessions every 5 minutes
 startCleanupInterval(5 * 60 * 1000);
+
+// ============================================
+// Automated WhatsApp Scheduled Reporting (whatsapp-report.md §3)
+// ============================================
+
+// Every 15 minutes — matches the tick window report-dispatch.ts's isDue()
+// checks against each schedule's configured delivery_time. Registered here
+// (not a separate service) because the live WhatsApp session Client objects
+// only exist in THIS process's memory (lib/whatsapp-client.ts's `sessions`
+// Map) — see that file's own comment on the single-instance limitation this
+// job inherits if whatsapp-engine is ever scaled to >1 replica.
+cron.schedule('*/15 * * * *', () => {
+  runScheduledReportDispatch().catch((err) => {
+    console.error('[whatsapp-engine] Scheduled report dispatch failed', err);
+  });
+});
 
 // ============================================
 // Start Server

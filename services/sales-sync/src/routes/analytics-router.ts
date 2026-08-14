@@ -16,7 +16,12 @@ const analyticsRouter = Router();
 
 // ─── Shared: resolve a [start, end) window from ?date=&period= ──────────────
 
-type Period = 'daily' | 'weekly' | 'monthly';
+// 'custom' added for the Admin Reports page's "Custom Date Range" filter
+// (whatsapp-report.md §1) — Today/Yesterday/This Week/This Month are all
+// already expressible via the existing date+period semantics (the caller
+// just picks the right anchor date), so only an arbitrary start/end pair
+// was a genuine gap.
+type Period = 'daily' | 'weekly' | 'monthly' | 'custom';
 
 /**
  * Resolves the report window in UTC day boundaries. A known simplification:
@@ -59,22 +64,40 @@ analyticsRouter.get(
 
       const dateParam = typeof req.query['date'] === 'string' ? req.query['date'] : '';
       const period = (typeof req.query['period'] === 'string' ? req.query['period'] : 'daily') as Period;
+      const startParam = typeof req.query['start'] === 'string' ? req.query['start'] : '';
+      const endParam = typeof req.query['end'] === 'string' ? req.query['end'] : '';
 
-      if (!DATE_RE.test(dateParam)) {
-        return next(Errors.invalidRequest('date is required in YYYY-MM-DD format'));
-      }
-      if (!['daily', 'weekly', 'monthly'].includes(period)) {
-        return next(Errors.invalidRequest('period must be daily, weekly, or monthly'));
+      if (!['daily', 'weekly', 'monthly', 'custom'].includes(period)) {
+        return next(Errors.invalidRequest('period must be daily, weekly, monthly, or custom'));
       }
 
-      const { start, end } = resolveWindow(dateParam, period);
+      let start: Date;
+      let end: Date;
+      if (period === 'custom') {
+        if (!DATE_RE.test(startParam) || !DATE_RE.test(endParam)) {
+          return next(Errors.invalidRequest('start and end are required in YYYY-MM-DD format when period=custom'));
+        }
+        start = new Date(`${startParam}T00:00:00.000Z`);
+        // Inclusive of the end date — the window is [start, end + 1 day).
+        end = new Date(new Date(`${endParam}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000);
+        if (end <= start) {
+          return next(Errors.invalidRequest('end must be on or after start'));
+        }
+      } else {
+        if (!DATE_RE.test(dateParam)) {
+          return next(Errors.invalidRequest('date is required in YYYY-MM-DD format'));
+        }
+        ({ start, end } = resolveWindow(dateParam, period));
+      }
       const params = [ctx.tenantId, start.toISOString(), end.toISOString()];
 
       const totalsResult = await query<{
         total_sales: string | null;
         total_orders: string;
+        total_discount: string | null;
       }>(
-        `SELECT COALESCE(SUM(total_amount), 0) AS total_sales, COUNT(*) AS total_orders
+        `SELECT COALESCE(SUM(total_amount), 0) AS total_sales, COUNT(*) AS total_orders,
+                COALESCE(SUM(discount_amount), 0) AS total_discount
          FROM sales
          WHERE tenant_id = $1 AND payment_status = 'PAID'
            AND sale_timestamp >= $2 AND sale_timestamp < $3
@@ -83,7 +106,75 @@ analyticsRouter.get(
       );
       const totalSales = Number(totalsResult.rows[0]?.total_sales ?? 0);
       const totalOrders = Number(totalsResult.rows[0]?.total_orders ?? 0);
+      const totalDiscountAmount = Number(totalsResult.rows[0]?.total_discount ?? 0);
       const averageOrderValue = totalOrders > 0 ? totalSales / totalOrders : 0;
+
+      // Net Profit needs a cost basis per product — inventories.cost_price
+      // (021_whatsapp_reports.sql), nullable by design: a product with no
+      // cost set is excluded from the calc rather than assumed to cost 0,
+      // which would silently overstate profit. If ANY sold line item in the
+      // window has no matching cost_price, netProfit comes back `null`
+      // (not a number that looks trustworthy but is actually a floor) —
+      // productsWithoutCost tells the UI how many line items are missing it.
+      const profitResult = await query<{
+        total_cost: string | null;
+        line_items_missing_cost: string;
+      }>(
+        `SELECT SUM((item->>'quantity')::numeric * COALESCE(i.cost_price, 0)) AS total_cost,
+                COUNT(*) FILTER (WHERE i.cost_price IS NULL) AS line_items_missing_cost
+         FROM sales s
+         CROSS JOIN jsonb_array_elements(s.items_sold) item
+         LEFT JOIN inventories i
+           ON i.tenant_id = s.tenant_id AND i.product_sku = item->>'product_sku'
+         WHERE s.tenant_id = $1 AND s.payment_status = 'PAID'
+           AND s.sale_timestamp >= $2 AND s.sale_timestamp < $3
+           AND s.deleted_at IS NULL`,
+        params,
+      );
+      const productsWithoutCost = Number(profitResult.rows[0]?.line_items_missing_cost ?? 0);
+      const netProfit = productsWithoutCost > 0
+        ? null
+        : totalSales - Number(profitResult.rows[0]?.total_cost ?? 0);
+
+      // Cashier performance for THIS date range — deliberately separate from
+      // GET /api/v1/shifts/staff-performance, which is scoped to the
+      // current/most-recent shift window, not an arbitrary range. The two
+      // can legitimately disagree for the same worker/day; that's expected,
+      // not a bug (they answer different questions).
+      const cashierResult = await query<{
+        worker_tag: string;
+        full_name: string | null;
+        role: string | null;
+        sales_count: string;
+        revenue: string;
+        register_status: string | null;
+      }>(
+        `SELECT s.worker_tag,
+                MAX(u.full_name) AS full_name,
+                MAX(u.role) AS role,
+                COUNT(*) AS sales_count,
+                SUM(s.total_amount) AS revenue,
+                (SELECT cds.status FROM cash_drawer_shifts cds
+                 WHERE cds.tenant_id = $1 AND cds.worker_tag = s.worker_tag
+                 ORDER BY cds.opened_at DESC LIMIT 1) AS register_status
+         FROM sales s
+         LEFT JOIN users u ON u.tenant_id = s.tenant_id AND u.worker_tag = s.worker_tag
+         WHERE s.tenant_id = $1 AND s.payment_status = 'PAID'
+           AND s.sale_timestamp >= $2 AND s.sale_timestamp < $3
+           AND s.deleted_at IS NULL
+         GROUP BY s.worker_tag
+         ORDER BY revenue DESC`,
+        params,
+      );
+
+      // Low-stock count is a point-in-time fact about current inventory, not
+      // scoped to the report's date range.
+      const lowStockResult = await query<{ count: string }>(
+        `SELECT COUNT(*) AS count FROM inventories
+         WHERE tenant_id = $1 AND deleted_at IS NULL AND stock_quantity <= reorder_level`,
+        [ctx.tenantId],
+      );
+      const lowStockCount = Number(lowStockResult.rows[0]?.count ?? 0);
 
       // Line items are denormalized JSONB on `sales.items_sold` (no separate
       // sale_items table — see 001_initial_schema.sql), so top-products and
@@ -186,11 +277,25 @@ analyticsRouter.get(
       );
 
       res.status(200).json({
-        date: dateParam,
+        date: period === 'custom' ? undefined : dateParam,
+        start: period === 'custom' ? startParam : undefined,
+        end: period === 'custom' ? endParam : undefined,
         period,
         totalSales,
         totalOrders,
         averageOrderValue,
+        totalDiscountAmount,
+        netProfit,
+        productsWithoutCost,
+        lowStockCount,
+        cashierPerformance: cashierResult.rows.map((r) => ({
+          workerTag: r.worker_tag,
+          fullName: r.full_name ?? r.worker_tag,
+          role: r.role,
+          salesCount: Number(r.sales_count),
+          revenue: Number(r.revenue),
+          registerStatus: r.register_status,
+        })),
         topSellingProducts: topProductsResult.rows.map((r) => ({
           sku: r.product_sku,
           name: r.name ?? r.product_sku,

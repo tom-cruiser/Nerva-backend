@@ -193,10 +193,8 @@ async function generatePDFReport(
  * Send PDF as WhatsApp attachment
  */
 async function sendPDFAttachment(tenantId: string, recipient: string, pdfPath: string): Promise<void> {
-  // Note: whatsapp-web.js supports sending media files
-  // This is a placeholder implementation
-  const { getSession } = await import('./whatsapp-client');
-  
+  const { getSession, resolveChatId } = await import('./whatsapp-client');
+
   const state = getSession(tenantId);
   if (!state || state.status !== 'READY') {
     throw new Error('WhatsApp session not ready');
@@ -204,7 +202,7 @@ async function sendPDFAttachment(tenantId: string, recipient: string, pdfPath: s
 
   // Read the PDF file
   const pdfBuffer = await fs.readFile(pdfPath);
-  
+
   // Send as media
   const media = new (await import('whatsapp-web.js')).MessageMedia(
     'application/pdf',
@@ -212,5 +210,11 @@ async function sendPDFAttachment(tenantId: string, recipient: string, pdfPath: s
     `report_${new Date().toISOString().split('T')[0]}.pdf`
   );
 
-  await state.client.sendMessage(recipient, media);
+  // Confirmed live (via the automated report-dispatch cron): passing
+  // `recipient` straight through as the chatId fails 100% of the time for
+  // LID-based contacts ("...@lid", not "...@c.us"). resolveChatId() does
+  // the same getNumberId() lookup sendMessageFrom() already uses for the
+  // text message above, so the PDF reaches the same resolved chat.
+  const chatId = await resolveChatId(tenantId, recipient);
+  await state.client.sendMessage(chatId, media);
 }
