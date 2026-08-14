@@ -273,7 +273,25 @@ reportRouter.post('/schedule', requireWhatsappReporting, requirePermission('what
          delivery_time = EXCLUDED.delivery_time, timezone = EXCLUDED.timezone,
          day_of_week = EXCLUDED.day_of_week, day_of_month = EXCLUDED.day_of_month,
          recipient_phones = EXCLUDED.recipient_phones, included_sections = EXCLUDED.included_sections,
-         updated_by = EXCLUDED.updated_by, updated_at = NOW()
+         updated_by = EXCLUDED.updated_by, updated_at = NOW(),
+         -- Confirmed real friction: last_sent_on only means "a dispatch was
+         -- attempted today" — it doesn't know WHICH delivery_time that was
+         -- for. Editing the time to test again same-day kept getting
+         -- silently skipped because the guard didn't realize "today" now
+         -- means something different. Re-arm it whenever anything that
+         -- affects WHEN this fires actually changes; leave it alone for
+         -- unrelated edits (recipients, sections, enabled toggle) so a
+         -- same-day report that's already gone out doesn't get resent
+         -- just because someone tweaked an unrelated field afterward.
+         last_sent_on = CASE
+           WHEN whatsapp_report_schedules.delivery_time IS DISTINCT FROM EXCLUDED.delivery_time
+             OR whatsapp_report_schedules.timezone IS DISTINCT FROM EXCLUDED.timezone
+             OR whatsapp_report_schedules.frequency IS DISTINCT FROM EXCLUDED.frequency
+             OR whatsapp_report_schedules.day_of_week IS DISTINCT FROM EXCLUDED.day_of_week
+             OR whatsapp_report_schedules.day_of_month IS DISTINCT FROM EXCLUDED.day_of_month
+           THEN NULL
+           ELSE whatsapp_report_schedules.last_sent_on
+         END
        RETURNING enabled, frequency, delivery_time::text, timezone, day_of_week, day_of_month,
                  recipient_phones, included_sections, updated_at`,
       [

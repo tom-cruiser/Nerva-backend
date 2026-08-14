@@ -504,7 +504,22 @@ export async function sendMessageFrom(
   try {
     const result = await state.client.sendMessage(chatId, message);
     state.messageCount++;
-    logger.info(tenantId, `Message sent successfully to ${chatId} (Total: ${state.messageCount})`);
+    // sendMessage() resolving does NOT mean WhatsApp actually accepted the
+    // message — confirmed live: it can resolve with `undefined` (WhatsApp
+    // Web's own store never registered the send) or with a Message object
+    // whose `ack` is MessageAck.ACK_ERROR (-1), and neither of those throws.
+    // A prior version of this code treated "promise resolved" as
+    // unconditional success, which is how a report got logged SENT here
+    // while never actually reaching the recipient's phone.
+    if (!result) {
+      logger.error(tenantId, `sendMessage to ${chatId} resolved with no message object — WhatsApp Web did not register the send`);
+      throw new Error('WhatsApp did not confirm the message was sent — it may not have been delivered.');
+    }
+    if (typeof result.ack === 'number' && result.ack < 0) {
+      logger.error(tenantId, `sendMessage to ${chatId} returned ack=${result.ack} (ACK_ERROR) — WhatsApp rejected the message`);
+      throw new Error('WhatsApp rejected the message (ACK_ERROR) — it was not delivered.');
+    }
+    logger.info(tenantId, `Message sent successfully to ${chatId} (ack=${result.ack}, Total: ${state.messageCount})`);
     return result;
   } catch (err: any) {
     logger.error(tenantId, `Send failed to ${chatId}:`, err?.message || err);
@@ -512,12 +527,15 @@ export async function sendMessageFrom(
     if (isLidResolutionError(err)) {
       logger.warn(tenantId, `LID resolution error detected, attempting fallback for ${chatId}`);
       const lidJid = await tryResolveLidJid(state.client, chatId);
-      
+
       if (lidJid) {
         try {
           logger.info(tenantId, `Retrying with resolved LID JID: ${lidJid}`);
           const result = await state.client.sendMessage(lidJid, message);
           state.messageCount++;
+          if (!result || (typeof result.ack === 'number' && result.ack < 0)) {
+            throw new Error('WhatsApp did not confirm the retried message was delivered.');
+          }
           return result;
         } catch (retryErr: any) {
           logger.error(tenantId, `Retry with LID JID failed:`, retryErr?.message || retryErr);
