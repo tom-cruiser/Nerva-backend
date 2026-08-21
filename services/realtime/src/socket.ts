@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from 'http';
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { verifySupabaseJwt, JwtVerificationError } from '@retail/middleware';
-import { tenantRoom, PLATFORM_STAFF_ROOM } from '@retail/redis';
+import { tenantRoom, PLATFORM_STAFF_ROOM, ALL_TENANTS_ROOM } from '@retail/redis';
 
 const PLATFORM_STAFF_PERMISSIONS = ['platform:support', 'platform:billing', 'superadmin:access'];
 
@@ -15,6 +15,10 @@ const PLATFORM_STAFF_PERMISSIONS = ['platform:support', 'platform:billing', 'sup
  * Room membership is decided once, at connect time, from the verified JWT's
  * own claims — never from anything the client sends outside the token:
  *   - `tenant:{tenantId}`  — any authenticated tenant user (app_metadata.tenant_id)
+ *   - `tenants:all`        — same population as above; a second room every
+ *                            tenant user also joins, for broadcasts that
+ *                            aren't scoped to one tenant (e.g. superadmin
+ *                            announcements — see ALL_TENANTS_ROOM)
  *   - `platform:staff`     — any token carrying a platform-staff or superadmin:access permission
  * A token can hold both (none of today's tokens do, but nothing prevents it).
  */
@@ -39,7 +43,7 @@ export function createSocketServer(httpServer: HttpServer): SocketIOServer {
       const permissions = Array.isArray(meta.permissions) ? (meta.permissions as string[]) : [];
 
       const rooms: string[] = [];
-      if (meta.tenant_id) rooms.push(tenantRoom(meta.tenant_id));
+      if (meta.tenant_id) rooms.push(tenantRoom(meta.tenant_id), ALL_TENANTS_ROOM);
       if (permissions.some((p) => PLATFORM_STAFF_PERMISSIONS.includes(p))) rooms.push(PLATFORM_STAFF_ROOM);
 
       if (rooms.length === 0) {

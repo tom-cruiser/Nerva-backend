@@ -2,7 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { getClient } from '@retail/db';
-import { redis } from '@retail/redis';
+import { redis, publishRealtimeEvent, ALL_TENANTS_ROOM } from '@retail/redis';
 import {
   requireSuperadmin,
   requireAnyPermission,
@@ -43,7 +43,9 @@ async function writePlatformAuditLog(
     action:
       | 'SETTINGS_UPDATE'
       | 'ANNOUNCEMENT_CREATE'
+      | 'ANNOUNCEMENT_UPDATE'
       | 'ANNOUNCEMENT_DEACTIVATE'
+      | 'ANNOUNCEMENT_DELETE'
       | 'SUPPORT_TOKEN_ISSUE'
       | 'SUPPORT_TOKEN_REVOKE';
     reason?: string | null;
@@ -249,6 +251,16 @@ router.post(
       });
 
       await client.query('COMMIT');
+
+      // Pushed to every connected tenant socket (see ALL_TENANTS_ROOM /
+      // services/realtime's socket.ts) so the dashboard banner appears
+      // instantly instead of waiting for that tab's next poll of
+      // GET /announcements/active. Best-effort — publishRealtimeEvent never
+      // throws, and any tab that missed it still picks the announcement up
+      // on its own next fetch of that same endpoint (see
+      // AnnouncementBanner.tsx's periodic refetch).
+      void publishRealtimeEvent(ALL_TENANTS_ROOM, 'platform:announcement_created', announcement);
+
       res.status(201).json({ announcement });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -290,7 +302,136 @@ router.post(
       });
 
       await client.query('COMMIT');
+
+      void publishRealtimeEvent(ALL_TENANTS_ROOM, 'platform:announcement_deactivated', {
+        id: updated.rows[0].id,
+      });
+
       res.status(200).json({ announcement: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  },
+);
+
+const announcementUpdateSchema = z.object({
+  message: z.string().trim().min(1).optional(),
+  level: z.enum(['INFO', 'WARNING', 'CRITICAL']).optional(),
+  ends_at: z.string().datetime().nullable().optional(),
+}).refine((d) => Object.keys(d).length > 0, 'At least one field must be provided');
+
+router.patch(
+  '/announcements/:id',
+  requireSuperadmin(),
+  idempotent,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const parse = announcementUpdateSchema.safeParse(req.body);
+    if (!parse.success) {
+      sendError(res, Errors.invalidRequest(parse.error.issues.map((i) => i.message).join('; ')));
+      return;
+    }
+    const ctx = getTenantContext(res);
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      // Build the SET clause from whatever subset of fields was sent —
+      // same pattern as inventory-router.ts's PATCH /products/:id.
+      const fields = parse.data;
+      const setClauses: string[] = [];
+      const params: unknown[] = [];
+      for (const [key, value] of Object.entries(fields)) {
+        params.push(value);
+        setClauses.push(`${key} = $${params.length}`);
+      }
+      params.push(req.params.id);
+
+      const updated = await client.query(
+        `UPDATE platform_announcements SET ${setClauses.join(', ')} WHERE id = $${params.length} RETURNING *`,
+        params,
+      );
+      if (updated.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Announcement not found'));
+        return;
+      }
+
+      await writePlatformAuditLog(client, {
+        tenantId: PLATFORM_SENTINEL_TENANT_ID,
+        tenantSlug: 'platform',
+        tenantName: 'PLATFORM',
+        action: 'ANNOUNCEMENT_UPDATE',
+        performedBy: ctx.userId,
+        performedByEmail: ctx.email,
+        details: { announcement_id: req.params.id, changed: Object.keys(fields) },
+      });
+
+      await client.query('COMMIT');
+
+      // Same event a tenant dashboard already listens for when an
+      // announcement is created — the banner just re-renders that
+      // announcement's row with the new fields, keyed by id.
+      void publishRealtimeEvent(ALL_TENANTS_ROOM, 'platform:announcement_updated', updated.rows[0]);
+
+      res.status(200).json({ announcement: updated.rows[0] });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  },
+);
+
+router.delete(
+  '/announcements/:id',
+  requireSuperadmin(),
+  idempotent,
+  async (req: Request, res: Response, next: NextFunction) => {
+    const ctx = getTenantContext(res);
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
+
+      // Hard delete, unlike /deactivate — there's no deleted_at column on
+      // this table (it's a small, low-stakes broadcast-banner log, not
+      // financial/audit data), and the superadmin action that removed it is
+      // itself durably recorded in platform_audit_logs below regardless.
+      const deleted = await client.query(
+        'DELETE FROM platform_announcements WHERE id = $1 RETURNING id',
+        [req.params.id],
+      );
+      if (deleted.rows.length === 0) {
+        await client.query('ROLLBACK');
+        sendError(res, Errors.notFound('Announcement not found'));
+        return;
+      }
+
+      await writePlatformAuditLog(client, {
+        tenantId: PLATFORM_SENTINEL_TENANT_ID,
+        tenantSlug: 'platform',
+        tenantName: 'PLATFORM',
+        action: 'ANNOUNCEMENT_DELETE',
+        performedBy: ctx.userId,
+        performedByEmail: ctx.email,
+        details: { announcement_id: req.params.id },
+      });
+
+      await client.query('COMMIT');
+
+      // Deliberately a DIFFERENT event name than /deactivate's
+      // 'platform:announcement_deactivated' — same immediate effect on the
+      // tenant banner (the announcement disappears), but kept distinct so
+      // anything that cares about the difference later (analytics, an
+      // activity feed) isn't stuck inferring it from context.
+      void publishRealtimeEvent(ALL_TENANTS_ROOM, 'platform:announcement_deleted', {
+        id: req.params.id,
+      });
+
+      res.status(200).json({ success: true, id: req.params.id });
     } catch (err) {
       await client.query('ROLLBACK');
       next(err);

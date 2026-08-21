@@ -20,6 +20,13 @@ export function tenantRoom(tenantId: string): string {
  *  platform:billing / superadmin:access) joins, regardless of tenant. */
 export const PLATFORM_STAFF_ROOM = 'platform:staff';
 
+/** Socket.IO room every authenticated tenant-user socket joins, in addition
+ *  to its own tenant room — for platform-wide broadcasts that aren't
+ *  specific to one tenant (e.g. superadmin announcements). See
+ *  services/superadmin's settings-router.ts (publishes here on
+ *  create/deactivate) and services/realtime's socket.ts (joins it). */
+export const ALL_TENANTS_ROOM = 'tenants:all';
+
 export interface RealtimeEventMessage {
   room:  string;
   event: string;
