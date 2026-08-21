@@ -1,3 +1,6 @@
 2026/08/21-16:23:16.038 1006f1 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-21fe281b-b9f4-4bba-a64b-7f835170646c/Default/Local Storage/leveldb/MANIFEST-000001
 2026/08/21-16:23:16.050 1006f1 Recovering log #4
 2026/08/21-16:23:16.051 1006f1 Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-21fe281b-b9f4-4bba-a64b-7f835170646c/Default/Local Storage/leveldb/000004.log 
+2026/08/21-17:53:27.254 1006e4 Level-0 table #8: started
+2026/08/21-17:53:27.262 1006e4 Level-0 table #8: 15660 bytes OK
+2026/08/21-17:53:27.266 1006e4 Delete type=0 #4
