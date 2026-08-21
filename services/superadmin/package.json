@@ -5,7 +5,8 @@
     "dev": "DOTENV_CONFIG_PATH=../../.env ts-node-dev -r dotenv/config --respawn --transpile-only src/server.ts",
     "build": "tsc --build",
     "start": "node dist/server.js",
-    "grant-superadmin": "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config scripts/grant-superadmin.ts"
+    "grant-superadmin": "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config scripts/grant-superadmin.ts",
+    "bootstrap-superadmin": "DOTENV_CONFIG_PATH=../../.env ts-node -r dotenv/config scripts/bootstrap-superadmin.ts"
   },
   "dependencies": {
     "@retail/config":         "*",

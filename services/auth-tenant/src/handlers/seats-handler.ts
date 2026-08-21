@@ -50,6 +50,8 @@ const GRANTABLE_EXTRA_PERMISSIONS: Permission[] = [
   'inventory:create', 'inventory:update', 'inventory:delete',
   // Void a completed sale
   'sales:void',
+  // Process a goods refund (full or partial) against a completed sale
+  'sales:refund',
   // Send WhatsApp messages/reports
   'whatsapp:send',
 ];

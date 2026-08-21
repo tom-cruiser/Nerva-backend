@@ -802,9 +802,12 @@ async function processLedgerEntry(
 
 type AuditAction =
   | 'CREATE' | 'UPDATE' | 'SOFT_DELETE' | 'VOID'
-  | 'CREDIT' | 'PAYMENT' | 'CLOCK_DRIFT';
+  | 'CREDIT' | 'PAYMENT' | 'CLOCK_DRIFT' | 'REFUND';
 
-async function writeAuditLog(
+// Exported for refund-service.ts, which writes its own 'REFUND' audit
+// entries under the same append-only audit_logs table/format rather than
+// duplicating this helper.
+export async function writeAuditLog(
   client:     PoolClient,
   tenantId:   string,
   entityType: string,

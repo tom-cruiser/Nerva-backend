@@ -107,6 +107,42 @@ export const customerDataSchema = z.object({
   credit_limit:   z.number().nonnegative().default(0),
 });
 
+// ─── Goods refund ───────────────────────────────────────────────────────────
+//
+// Unlike sales/inventories/customers/ledger_entries above, refunds are NOT
+// part of the offline WatermelonDB sync protocol — processing one requires
+// checking the sale's *current* server-side state (how much of it has
+// already been refunded, live stock/ledger rows) and is a rarer,
+// supervisor-gated action, so it goes through its own always-online endpoint
+// (see routes/sales-router.ts) rather than through processSync's LWW queue.
+
+/** One line being returned. Matches a subset of the sale's own items_sold
+ *  entries — validated against what was actually sold in refund-service.ts,
+ *  not here (this schema only knows the request shape). */
+export const refundLineItemSchema = z.object({
+  product_sku: z.string().min(1),
+  quantity:    decimalQuantity(true),
+  // Must match the `unit` the corresponding items_sold line was rung up in
+  // (omitted = the product's base_unit) — see reserveStockForSale's comment.
+  unit:        z.string().min(1).optional(),
+});
+
+export const refundRequestSchema = z.object({
+  items:  z.array(refundLineItemSchema).min(1, 'At least one line item is required'),
+  reason: z.string().min(1, 'A refund reason is required').max(255),
+  // FALSE for goods that came back damaged/unsellable — the customer still
+  // gets their money back, but the stock is deliberately not returned to
+  // sellable inventory. Defaults to TRUE (the common "shelf-fit" return).
+  restock: z.boolean().default(true),
+  // Optional client-generated dedup key — a retried/double-submitted request
+  // with the same (sale_id, client_reference) replays the original refund
+  // instead of refunding the same goods/money twice.
+  client_reference: z.string().min(1).max(100).optional(),
+});
+
+export type RefundLineItemInput = z.infer<typeof refundLineItemSchema>;
+export type RefundRequestInput  = z.infer<typeof refundRequestSchema>;
+
 export const ledgerEntryDataSchema = z.object({
   customer_ledger_id: z.string().uuid(),
   entry_type:         z.enum(['CREDIT', 'PAYMENT', 'ADJUSTMENT']),

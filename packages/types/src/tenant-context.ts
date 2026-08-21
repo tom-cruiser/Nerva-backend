@@ -17,6 +17,11 @@ export type Permission =
   | 'sales:read'
   | 'sales:create'
   | 'sales:void'
+  // Process a goods refund (full or partial) against a completed sale —
+  // separate from 'sales:void' because voiding cancels a transaction outright
+  // while a refund reverses part or all of one that already completed
+  // (restocking inventory, adjusting the customer ledger if it was on credit).
+  | 'sales:refund'
   // Ledger
   | 'ledger:read'
   | 'ledger:create'
@@ -61,7 +66,7 @@ export type Permission =
 export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   OWNER: [
     'inventory:read', 'inventory:create', 'inventory:update', 'inventory:delete',
-    'sales:read', 'sales:create', 'sales:void',
+    'sales:read', 'sales:create', 'sales:void', 'sales:refund',
     'ledger:read', 'ledger:create', 'ledger:update', 'ledger:credit', 'ledger:payment',
     'users:read', 'users:create', 'users:update', 'users:delete',
     'reports:read',
@@ -70,7 +75,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
   ],
   MANAGER: [
     'inventory:read', 'inventory:create', 'inventory:update',
-    'sales:read', 'sales:create', 'sales:void',
+    'sales:read', 'sales:create', 'sales:void', 'sales:refund',
     'ledger:read', 'ledger:create', 'ledger:update', 'ledger:credit', 'ledger:payment',
     'users:read',
     'reports:read',

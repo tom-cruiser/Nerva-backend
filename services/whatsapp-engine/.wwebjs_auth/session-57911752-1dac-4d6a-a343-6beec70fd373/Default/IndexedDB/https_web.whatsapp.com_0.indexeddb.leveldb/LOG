@@ -1,0 +1,63 @@
+2026/08/17-20:06:02.466 22d5 Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-57911752-1dac-4d6a-a343-6beec70fd373/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/08/17-20:06:02.467 22d5 Recovering log #1100
+2026/08/17-20:06:02.498 22d5 Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-57911752-1dac-4d6a-a343-6beec70fd373/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/001100.log 
+2026/08/17-20:06:11.698 22d7 Level-0 table #1120: started
+2026/08/17-20:06:11.732 22d7 Level-0 table #1120: 1135480 bytes OK
+2026/08/17-20:06:11.737 22d7 Delete type=0 #1100
+2026/08/17-20:06:11.876 22d7 Compacting 1@0 + 1@1 files
+2026/08/17-20:06:11.898 22d7 Generated table #1121@0: 12761 keys, 272326 bytes
+2026/08/17-20:06:11.915 22d7 Generated table #1122@0: 1970 keys, 169075 bytes
+2026/08/17-20:06:11.924 22d7 Generated table #1123@0: 6507 keys, 130838 bytes
+2026/08/17-20:06:11.924 22d7 Compacted 1@0 + 1@1 files => 572239 bytes
+2026/08/17-20:06:11.935 22d7 compacted to: files[ 0 3 26 0 0 0 0 ]
+2026/08/17-20:06:11.997 22d7 Compacting 1@1 + 10@2 files
+2026/08/17-20:06:12.054 22d7 Generated table #1124@1: 45366 keys, 2223862 bytes
+2026/08/17-20:06:12.109 22d7 Generated table #1125@1: 39928 keys, 2205389 bytes
+2026/08/17-20:06:12.134 22d7 Generated table #1126@1: 1823 keys, 2148975 bytes
+2026/08/17-20:06:12.160 22d7 Generated table #1127@1: 1976 keys, 2154445 bytes
+2026/08/17-20:06:12.186 22d7 Generated table #1128@1: 1774 keys, 2150303 bytes
+2026/08/17-20:06:12.204 22d7 Generated table #1129@1: 1671 keys, 2142411 bytes
+2026/08/17-20:06:12.229 22d7 Generated table #1130@1: 2155 keys, 2151384 bytes
+2026/08/17-20:06:12.251 22d7 Generated table #1131@1: 2185 keys, 2142861 bytes
+2026/08/17-20:06:12.277 22d7 Generated table #1132@1: 7239 keys, 2153072 bytes
+2026/08/17-20:06:12.348 22d7 Generated table #1133@1: 29489 keys, 2218644 bytes
+2026/08/17-20:06:12.348 22d7 Compacted 1@1 + 10@2 files => 21691346 bytes
+2026/08/17-20:06:12.351 22d7 compacted to: files[ 0 2 26 0 0 0 0 ]
+2026/08/17-20:06:12.355 22d7 Compacting 1@1 + 10@2 files
+2026/08/17-20:06:12.422 22d7 Generated table #1134@1: 26305 keys, 2263014 bytes
+2026/08/17-20:06:12.477 22d7 Generated table #1135@1: 23069 keys, 2232062 bytes
+2026/08/17-20:06:12.500 22d7 Generated table #1136@1: 5168 keys, 2126283 bytes
+2026/08/17-20:06:12.521 22d7 Generated table #1137@1: 1538 keys, 2113908 bytes
+2026/08/17-20:06:12.549 22d7 Generated table #1138@1: 4904 keys, 2126797 bytes
+2026/08/17-20:06:12.618 22d7 Generated table #1139@1: 83040 keys, 2228509 bytes
+2026/08/17-20:06:12.697 22d7 Generated table #1140@1: 100573 keys, 2250019 bytes
+2026/08/17-20:06:12.771 22d7 Generated table #1141@1: 101109 keys, 2250441 bytes
+2026/08/17-20:06:12.844 22d7 Generated table #1142@1: 101641 keys, 2252966 bytes
+2026/08/17-20:06:12.920 22d7 Generated table #1143@1: 100990 keys, 2252497 bytes
+2026/08/17-20:06:12.924 22d7 Generated table #1144@1: 1767 keys, 39560 bytes
+2026/08/17-20:06:12.924 22d7 Compacted 1@1 + 10@2 files => 22136056 bytes
+2026/08/17-20:06:12.929 22d7 compacted to: files[ 0 1 27 0 0 0 0 ]
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1106
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1107
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1056
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1053
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1120
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1054
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1117
+2026/08/17-20:06:12.929 22d7 Delete type=2 #1122
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1111
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1109
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1108
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1058
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1059
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1121
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1105
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1114
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1057
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1116
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1110
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1112
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1055
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1104
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1113
+2026/08/17-20:06:12.930 22d7 Delete type=2 #1052

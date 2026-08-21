@@ -9,6 +9,7 @@ import {
 } from '@retail/middleware';
 import { syncRouter } from './routes/sync-router';
 import { analyticsRouter } from './routes/analytics-router';
+import { salesRouter } from './routes/sales-router';
 
 // Start the BullMQ worker when the app module is loaded.
 // Import side-effect only — the worker registers itself with BullMQ.
@@ -35,6 +36,9 @@ app.use('/api/v1/sync', tenantContextMiddleware, syncRouter);
 // Tenant sales-report/registers analytics — mounted under the same /sync
 // prefix so no nginx/dev-gateway route change is needed (see analytics-router.ts).
 app.use('/api/v1/sync/analytics', tenantContextMiddleware, analyticsRouter);
+// Goods refunds against a completed sale — same reasoning: mounted under
+// /sync so the existing nginx location block already routes it here.
+app.use('/api/v1/sync/sales', tenantContextMiddleware, salesRouter);
 
 app.use(globalErrorHandler('sales-sync'));
 

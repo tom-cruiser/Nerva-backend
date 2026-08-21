@@ -29,6 +29,11 @@ interface InventoryRow {
   // page's Net Profit metric. No default: a product with no cost set is
   // excluded from profit calcs rather than assumed to cost 0.
   cost_price:       string | null;
+  // Percentage tax rate the owner sets per product (025_inventory_tax_rate.sql)
+  // — NOT NULL, unlike cost_price, since "unset" and "0% tax" mean the same
+  // thing here and a product should never be excluded from a tax total for
+  // lack of one.
+  tax_rate:         string;
   version:          number;
   updated_at:       string;
   deleted_at:       string | null;
@@ -49,6 +54,7 @@ function toProduct(row: InventoryRow) {
     base_unit:        row.base_unit,
     category:         row.category,
     cost_price:       row.cost_price === null ? null : parseFloat(row.cost_price),
+    tax_rate:         parseFloat(row.tax_rate),
     // Confirmed-broken bug fix: the product response never included
     // `version` even though PATCH /products/:id has always required it for
     // its optimistic lock — the frontend had no way to send back a value it
@@ -63,7 +69,7 @@ function toProduct(row: InventoryRow) {
 
 const PRODUCT_COLS = `
   id, product_sku, barcode, name, description,
-  unit_price, stock_quantity, reorder_level, reorder_quantity, base_unit, category, cost_price,
+  unit_price, stock_quantity, reorder_level, reorder_quantity, base_unit, category, cost_price, tax_rate,
   version, updated_at, deleted_at
 `;
 
@@ -682,6 +688,10 @@ const createSchema = z.object({
   description:      z.string().nullable().optional(),
   category:         z.string().max(100).nullable().optional(),
   cost_price:       z.number().nonnegative().nullable().optional(),
+  // Owner-set per-product tax rate — no tenant-wide default; a product with
+  // none set is 0% (untaxed), not "unknown", so this is a plain default
+  // rather than nullable like cost_price.
+  tax_rate:         z.number().min(0).max(100).default(0),
 });
 
 /**
@@ -715,9 +725,9 @@ inventoryRouter.post(
         const result = await client.query<InventoryRow>(
           `INSERT INTO inventories
              (tenant_id, product_sku, barcode, name, description,
-              unit_price, stock_quantity, reorder_level, reorder_quantity, base_unit, category, cost_price,
+              unit_price, stock_quantity, reorder_level, reorder_quantity, base_unit, category, cost_price, tax_rate,
               created_by, updated_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)
            RETURNING ${PRODUCT_COLS}`,
           [
             ctx.tenantId,
@@ -732,6 +742,7 @@ inventoryRouter.post(
             d.base_unit,
             d.category       ?? null,
             d.cost_price     ?? null,
+            d.tax_rate,
             ctx.userId,
           ],
         );
@@ -776,6 +787,7 @@ const patchSchema = z.object({
   description:      z.string().nullable().optional(),
   category:         z.string().max(100).nullable().optional(),
   cost_price:       z.number().nonnegative().nullable().optional(),
+  tax_rate:         z.number().min(0).max(100).optional(),
   /** Optimistic lock — send the version you last read. */
   version:          z.number().int().positive(),
 }).refine(
@@ -814,7 +826,7 @@ inventoryRouter.patch(
 
       const updatableFields = [
         'name', 'unit_price', 'stock_quantity', 'reorder_level', 'reorder_quantity', 'base_unit',
-        'barcode', 'description', 'category', 'cost_price',
+        'barcode', 'description', 'category', 'cost_price', 'tax_rate',
       ] as const;
 
       for (const field of updatableFields) {

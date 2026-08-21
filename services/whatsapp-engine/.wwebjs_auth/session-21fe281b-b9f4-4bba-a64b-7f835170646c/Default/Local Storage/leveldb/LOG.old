@@ -1,0 +1,6 @@
+2026/08/17-18:43:03.847 311b Reusing MANIFEST /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-21fe281b-b9f4-4bba-a64b-7f835170646c/Default/Local Storage/leveldb/MANIFEST-000001
+2026/08/17-18:43:03.862 311b Recovering log #3
+2026/08/17-18:43:03.865 311b Reusing old log /home/zha/Desktop/project/Nerva/Nerva-backend/services/whatsapp-engine/.wwebjs_auth/session-21fe281b-b9f4-4bba-a64b-7f835170646c/Default/Local Storage/leveldb/000003.log 
+2026/08/17-18:45:43.893 3110 Level-0 table #5: started
+2026/08/17-18:45:43.898 3110 Level-0 table #5: 21077 bytes OK
+2026/08/17-18:45:43.902 3110 Delete type=0 #3
