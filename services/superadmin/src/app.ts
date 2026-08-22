@@ -7,6 +7,7 @@ import { subscriptionsRouter } from './routes/subscriptions-router';
 import { analyticsRouter } from './routes/analytics-router';
 import { platformOpsRouter } from './routes/platform-ops-router';
 import { settingsRouter } from './routes/settings-router';
+import { supportRouter } from './routes/support-router';
 import { publicAnnouncementsRouter } from './routes/public-announcements-router';
 
 const app = express();
@@ -55,6 +56,7 @@ app.use(
   analyticsRouter,
   platformOpsRouter,
   settingsRouter,
+  supportRouter,
 );
 
 // ─── Global error handler (must be last) ─────────────────────────────────────

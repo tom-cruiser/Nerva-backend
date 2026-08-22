@@ -13,6 +13,10 @@ import {
   getSubscriptionHandler,
   requestSubscriptionUpgradeHandler,
 } from '../handlers/subscription-handler';
+import {
+  listSupportMessagesHandler,
+  sendSupportMessageHandler,
+} from '../handlers/support-handler';
 
 const authRouter = Router();
 
@@ -123,6 +127,26 @@ authRouter.post(
   tenantContextMiddleware,
   idempotency(redis),
   requestSubscriptionUpgradeHandler,
+);
+
+/**
+ * GET  /api/v1/auth/support/messages — full thread history with the Super
+ *   Admin support team, oldest first. Marks the Super Admin's replies read.
+ * POST /api/v1/auth/support/messages — send a message to the Super Admin
+ *   team. Deliberately requires no Permission — every role, including
+ *   STAFF, can reach support (see support-handler.ts).
+ */
+authRouter.get(
+  '/support/messages',
+  tenantContextMiddleware,
+  listSupportMessagesHandler,
+);
+
+authRouter.post(
+  '/support/messages',
+  tenantContextMiddleware,
+  idempotency(redis),
+  sendSupportMessageHandler,
 );
 
 export { authRouter };
